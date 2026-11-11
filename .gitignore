@@ -1,0 +1,26 @@
+# Local Android SDK path
+local.properties
+
+# Gradle and Kotlin caches
+.gradle/
+.kotlin/
+**/build/
+
+# Android native build outputs
+.cxx/
+.externalNativeBuild/
+
+# IDE metadata
+.idea/
+*.iml
+.DS_Store
+
+# Signing keys and credentials: never commit these
+*.jks
+*.keystore
+*.p12
+*.pfx
+keystore.properties
+signing.properties
+.env
+.env.*
