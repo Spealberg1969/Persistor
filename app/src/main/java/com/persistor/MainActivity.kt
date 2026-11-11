@@ -198,8 +198,6 @@ fun MainScreen(vm: MainViewModel) {
                         CompressionMethod.HEIF -> "Требуется Android 10+ и доступный HEVC-кодек телефона."
                         CompressionMethod.AVIF -> "Требуется Android 14+ и доступный AV1-кодек телефона."
                         CompressionMethod.JPEG_XL -> "Выход .jxl; приложение проверяет его собственной библиотекой, но галереи и старые просмотрщики могут не открыть файл."
-                        CompressionMethod.TIFF_G4 -> "1-битный чёрно-белый TIFF; порог 160. Цвет/полутона теряются, SSIM не применяется."
-                        CompressionMethod.JBIG2 -> "1-битный чёрно-белый JBIG2 без потерь после бинаризации; порог 160. SSIM не применяется."
                         else -> "Для цветных форматов качество подбирается по SSIM; результат зависит от выбранного кодека."
                     }
                     Text(formatHint, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)

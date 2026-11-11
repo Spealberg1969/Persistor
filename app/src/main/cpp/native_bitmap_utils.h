@@ -68,7 +68,7 @@ inline bool ReadRgb(JNIEnv* env, jobject bitmap, std::vector<uint8_t>* rgb,
                 g = static_cast<uint8_t>(((p >> 5) & 63) * 255 / 63);
                 b = static_cast<uint8_t>((p & 31) * 255 / 31);
             }
-            // JPEG, TIFF G4 and JBIG2 are opaque. Composite transparent pixels on white.
+            // JPEG is opaque. Composite transparent pixels on white.
             const size_t o = (static_cast<size_t>(y) * info.width + x) * 3;
             rgb->at(o) = static_cast<uint8_t>((static_cast<unsigned>(r) * a + 255U * (255U - a) + 127U) / 255U);
             rgb->at(o + 1) = static_cast<uint8_t>((static_cast<unsigned>(g) * a + 255U * (255U - a) + 127U) / 255U);

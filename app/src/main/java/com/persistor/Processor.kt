@@ -28,7 +28,6 @@ enum class CompressionMethod(
     val label: String,
     val extension: String,
     val mimeType: String,
-    val monochrome: Boolean = false,
 ) {
     ANDROID("android", "JPEG (Android)", "jpg", "image/jpeg"),
     JPEGLI("jpegli", "JPEGli (JPEG)", "jpg", "image/jpeg"),
@@ -36,9 +35,7 @@ enum class CompressionMethod(
     WEBP("webp", "WebP lossy", "webp", "image/webp"),
     JPEG_XL("jpeg_xl", "JPEG XL", "jxl", "image/jxl"),
     HEIF("heif", "HEIF / HEIC", "heic", "image/heic"),
-    AVIF("avif", "AVIF", "avif", "image/avif"),
-    TIFF_G4("tiff_g4", "TIFF CCITT Group 4", "tif", "image/tiff", monochrome = true),
-    JBIG2("jbig2", "JBIG2 (lossless)", "jb2", "application/octet-stream", monochrome = true);
+    AVIF("avif", "AVIF", "avif", "image/avif");
 
     companion object {
         fun fromKey(key: String?): CompressionMethod = entries.firstOrNull { it.key == key } ?: ANDROID
@@ -206,9 +203,7 @@ class Processor(private val context: Context) {
         // 4. Очистка — только после успешной проверки
         if (st.deleteTempFolder) folder.delete()
         var deleted = 0
-        if (st.deleteOriginals && st.compressionMethod.monochrome) {
-            warnings += "Исходники сохранены: TIFF G4/JBIG2 необратимо переводят изображение в чёрно-белый растр"
-        } else if (st.deleteOriginals) {
+        if (st.deleteOriginals) {
             for (img in images) {
                 val ok2 = DocumentFile.fromSingleUri(context, img.uri)?.delete() == true
                 if (ok2) deleted++ else warnings += "Не удалось удалить ${img.name}"
@@ -220,17 +215,12 @@ class Processor(private val context: Context) {
 
     private data class EncodedImage(val bytes: ByteArray, val extension: String, val mimeType: String)
 
-    /** Подбор качества SSIM применим к обычным codec-режимам; bilevel codecs lossless после порога. */
+    /** Подбирает минимальное качество кодека, при котором изображение достигает заданной цели SSIM. */
     private fun compressOne(uri: Uri, name: String, st: ProcessSettings, warnings: MutableList<String>): EncodedImage {
         val decoded = resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it) }
             ?: error("Не удалось прочитать $name")
         val bmp = decoded.applyOrientation(readOrientation(uri))
         try {
-            if (st.compressionMethod.monochrome) {
-                warnings += "$name: ${st.compressionMethod.label} выполняет пороговую бинаризацию (threshold=160); цвет и полутона теряются, поиск SSIM/Q не применяется"
-                val result = encode(bmp, 95, st.compressionMethod)
-                return EncodedImage(result, st.compressionMethod.extension, st.compressionMethod.mimeType)
-            }
             var lo = st.minQuality
             var hi = 95
             var best: ByteArray? = null
@@ -268,8 +258,6 @@ class Processor(private val context: Context) {
         CompressionMethod.JPEG_XL -> JxlEncoder.encode(bmp, q)
         CompressionMethod.HEIF -> PlatformImageEncoder.encodeHeif(bmp, q, context.cacheDir)
         CompressionMethod.AVIF -> PlatformImageEncoder.encodeAvif(bmp, q, context.cacheDir)
-        CompressionMethod.TIFF_G4 -> NativeImageEncoder.encodeTiffG4(bmp)
-        CompressionMethod.JBIG2 -> NativeImageEncoder.encodeJbig2(bmp)
     }
 
     private fun ssimOf(orig: Bitmap, bytes: ByteArray, method: CompressionMethod): Double {

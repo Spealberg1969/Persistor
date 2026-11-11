@@ -13,6 +13,8 @@ class CompressionMethodTest {
         assertEquals(CompressionMethod.ANDROID, CompressionMethod.fromKey("android"))
         assertEquals(CompressionMethod.JPEGLI, CompressionMethod.fromKey("jpegli"))
         assertEquals(CompressionMethod.ANDROID, CompressionMethod.fromKey("future-unknown-codec"))
+        assertEquals(CompressionMethod.ANDROID, CompressionMethod.fromKey("tiff_g4"))
+        assertEquals(CompressionMethod.ANDROID, CompressionMethod.fromKey("jbig2"))
     }
 
     @Test
@@ -27,15 +29,6 @@ class CompressionMethodTest {
         assertEquals("heic", CompressionMethod.HEIF.extension)
         assertEquals("avif", CompressionMethod.AVIF.extension)
         assertEquals("jxl", CompressionMethod.JPEG_XL.extension)
-        assertEquals("tif", CompressionMethod.TIFF_G4.extension)
-        assertEquals("jb2", CompressionMethod.JBIG2.extension)
-    }
-
-    @Test
-    fun onlyBilevelCodecsAreMarkedMonochrome() {
-        assertTrue(CompressionMethod.TIFF_G4.monochrome)
-        assertTrue(CompressionMethod.JBIG2.monochrome)
-        assertFalse(CompressionMethod.WEBP.monochrome)
-        assertFalse(CompressionMethod.JPEG_XL.monochrome)
+        assertFalse(CompressionMethod.entries.any { it.key == "tiff_g4" || it.key == "jbig2" })
     }
 }

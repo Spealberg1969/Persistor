@@ -23,6 +23,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
@@ -45,9 +47,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
@@ -61,7 +65,14 @@ import androidx.lifecycle.LifecycleEventObserver
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlin.math.abs
+import java.io.File
+
+private const val MAX_PDF_SESSION_PAGES = 100
+private const val MAX_PDF_SESSION_BYTES = 256L * 1024L * 1024L
 
 /**
  * Камера Persistor. Экран вращается вместе с телефоном по датчику положения,
@@ -179,10 +190,37 @@ fun CameraScreen(angleState: MutableIntState) {
     var showResDialog by remember { mutableStateOf(false) }
     var showCustomDialog by remember { mutableStateOf(false) }
     var showOverlayDialog by remember { mutableStateOf(false) }
+    var captureMode by remember { mutableStateOf(CameraOutputMode.PHOTO) }
+    var showCaptureModeMenu by remember { mutableStateOf(false) }
+    var showPdfSettings by remember { mutableStateOf(false) }
+    var pdfCodec by remember { mutableStateOf(PdfJpegCodec.ANDROID_JPEG) }
+    var pdfQuality by remember { mutableIntStateOf(90) }
+    val pdfPages = remember { mutableStateListOf<PdfJpegPage>() }
+    var isFinalizingPdf by remember { mutableStateOf(false) }
+    var showExitPdfPrompt by remember { mutableStateOf(false) }
+    var showDiscardPdfPrompt by remember { mutableStateOf(false) }
+    val pdfSessionDir = remember {
+        File(appCtx.cacheDir, "persistor-pdf-${System.nanoTime()}").apply { mkdirs() }
+    }
+    val latestTarget = rememberUpdatedState(target)
+    val latestPdfCodec = rememberUpdatedState(pdfCodec)
+    val latestPdfQuality = rememberUpdatedState(pdfQuality)
     var overlayPreviewTime by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var lensIdx by remember { mutableIntStateOf(-1) }
     var lensMenu by remember { mutableStateOf(false) }
     var focusMark by remember { mutableStateOf<Offset?>(null) }
+
+    LaunchedEffect(target) {
+        reviewIdx = null
+        shots.clear()
+        val folder = target ?: return@LaunchedEffect
+        val existing = repo.list(setOf(folder)).map { it.uri }
+        if (target == folder) {
+            val capturedWhileLoading = shots.toList()
+            shots.clear()
+            shots.addAll((capturedWhileLoading + existing).distinct())
+        }
+    }
 
     val controller = remember {
         CameraController(
@@ -193,7 +231,61 @@ fun CameraScreen(angleState: MutableIntState) {
                     savedCount++
                     lastSaved = name
                     errorText = null
-                    shots.add(uri)
+                    shots.remove(uri)
+                    shots.add(0, uri)
+                }
+            },
+            onPdfCaptured = { bytes, mode, complete ->
+                val folder = latestTarget.value
+                val selectedCodec = latestPdfCodec.value
+                val selectedQuality = latestPdfQuality.value
+                scope.launch {
+                    var temporaryPage: File? = null
+                    var retainPage = false
+                    var temporaryPdf: File? = null
+                    try {
+                        val outputFolder = folder ?: error("Папка для PDF не выбрана")
+                        val pageFile = File(pdfSessionDir, "page-${System.nanoTime()}.jpg")
+                        temporaryPage = pageFile
+                        val page = withContext(Dispatchers.IO) {
+                            PdfPageCompressor.encode(bytes, pageFile, selectedCodec, selectedQuality)
+                        }
+                        when (mode) {
+                            CameraOutputMode.PDF_SINGLE_PAGE -> {
+                                val outputPdf = File(pdfSessionDir, "single-${System.nanoTime()}.pdf")
+                                temporaryPdf = outputPdf
+                                val saved = withContext(Dispatchers.IO) {
+                                    PdfDocumentWriter.write(listOf(page), outputPdf)
+                                    savePdfToTree(appCtx, outputFolder, outputPdf)
+                                }
+                                lastSaved = "PDF: ${saved.first}"
+                                errorText = null
+                                savedCount++
+                            }
+                            CameraOutputMode.PDF_MULTI_PAGE -> {
+                                val existingBytes = pdfPages.sumOf { it.file.length() }
+                                require(pdfPages.size < MAX_PDF_SESSION_PAGES) {
+                                    "Достигнут лимит $MAX_PDF_SESSION_PAGES страниц в одном PDF"
+                                }
+                                require(existingBytes + page.file.length() <= MAX_PDF_SESSION_BYTES) {
+                                    "Добавление этой страницы превысит ограничение PDF-сессии в 256 МБ"
+                                }
+                                pdfPages.add(page)
+                                retainPage = true
+                                lastSaved = "Страница добавлена в PDF · ${pdfPages.size}"
+                                errorText = null
+                            }
+                            CameraOutputMode.PHOTO -> error("Неизвестный режим съёмки PDF")
+                        }
+                    } catch (failure: OutOfMemoryError) {
+                        errorText = "Не хватило памяти для сжатия страницы PDF."
+                    } catch (failure: Exception) {
+                        errorText = "Не удалось сохранить страницу PDF: ${failure.message ?: failure.javaClass.simpleName}"
+                    } finally {
+                        if (!retainPage) temporaryPage?.delete()
+                        temporaryPdf?.delete()
+                        complete()
+                    }
                 }
             },
         )
@@ -201,8 +293,15 @@ fun CameraScreen(angleState: MutableIntState) {
     SideEffect {
         controller.saveDir = target
         controller.overlaySettings = overlaySettings
+        controller.updateDeviceAngle(angleState.intValue)
+        controller.outputMode = captureMode
     }
-    DisposableEffect(Unit) { onDispose { controller.release() } }
+    DisposableEffect(Unit) {
+        onDispose {
+            controller.release()
+            pdfSessionDir.deleteRecursively()
+        }
+    }
 
     // Объективы: по умолчанию основной (около 23 мм)
     val lenses = remember { runCatching { controller.lenses() }.getOrDefault(emptyList()) }
@@ -269,17 +368,113 @@ fun CameraScreen(angleState: MutableIntState) {
 
     BackHandler(enabled = showDiag) { showDiag = false }
     BackHandler(enabled = reviewIdx != null) { reviewIdx = null }
+    BackHandler(enabled = showExitPdfPrompt) { showExitPdfPrompt = false }
+    BackHandler(enabled = showDiscardPdfPrompt) { showDiscardPdfPrompt = false }
+    BackHandler(enabled = pdfPages.isNotEmpty() && reviewIdx == null && !showExitPdfPrompt && !showDiscardPdfPrompt && !isFinalizingPdf) {
+        if (controller.busy) errorText = "Дождитесь завершения обработки текущей страницы PDF."
+        else showExitPdfPrompt = true
+    }
+    BackHandler(enabled = controller.busy || isFinalizingPdf) {
+        errorText = "Дождитесь завершения сохранения текущего кадра."
+    }
 
     if (showDiag) {
         DiagScreen(onBack = { showDiag = false })
         return
     }
 
-    val ready = target != null && plan != null && hasPermission && !controller.busy
+    fun discardPdfSession() {
+        pdfPages.forEach { it.file.delete() }
+        pdfPages.clear()
+        if (lastSaved?.startsWith("Страница добавлена в PDF") == true) lastSaved = null
+        showExitPdfPrompt = false
+        showDiscardPdfPrompt = false
+    }
+
+    fun finishPdfSession(exitAfterSave: Boolean = false) {
+        if (pdfPages.isEmpty() || isFinalizingPdf) return
+        val outputFolder = target
+        if (outputFolder == null) {
+            errorText = "Выберите папку для сохранения PDF."
+            return
+        }
+        val pagesToWrite = pdfPages.toList()
+        val temporaryPdf = File(pdfSessionDir, "multipage-${System.nanoTime()}.pdf")
+        isFinalizingPdf = true
+        scope.launch {
+            try {
+                val saved = withContext(Dispatchers.IO) {
+                    PdfDocumentWriter.write(pagesToWrite, temporaryPdf)
+                    savePdfToTree(appCtx, outputFolder, temporaryPdf)
+                }
+                lastSaved = "PDF: ${saved.first}"
+                errorText = null
+                savedCount++
+                pagesToWrite.forEach { it.file.delete() }
+                pdfPages.clear()
+                showExitPdfPrompt = false
+                if (exitAfterSave) activity.finish()
+            } catch (failure: OutOfMemoryError) {
+                errorText = "Не хватило памяти для сборки PDF. Страницы сохранены как черновик."
+            } catch (failure: Exception) {
+                errorText = "Не удалось сохранить PDF: ${failure.message ?: failure.javaClass.simpleName}"
+            } finally {
+                temporaryPdf.delete()
+                isFinalizingPdf = false
+            }
+        }
+    }
+
+    val pdfSessionLimitReached = captureMode == CameraOutputMode.PDF_MULTI_PAGE &&
+        (pdfPages.size >= MAX_PDF_SESSION_PAGES || pdfPages.sumOf { it.file.length() } >= MAX_PDF_SESSION_BYTES)
+    val ready = target != null && plan != null && hasPermission && !controller.busy && !isFinalizingPdf && !pdfSessionLimitReached
 
     // ---- Элементы управления ----
     val closeBtn: @Composable () -> Unit = {
-        PButton(onClick = { activity.finish() }) { Text("✕ Закрыть", color = Color.White) }
+        PButton(
+            onClick = { if (pdfPages.isNotEmpty()) showExitPdfPrompt = true else activity.finish() },
+            enabled = !controller.busy && !isFinalizingPdf,
+        ) { Text("✕ Закрыть", color = Color.White) }
+    }
+    val captureModeBtn: @Composable () -> Unit = {
+        Box {
+            PButton(onClick = { showCaptureModeMenu = true }, enabled = !controller.busy && !isFinalizingPdf) {
+                Text("Режим: ${captureMode.title}", color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            DropdownMenu(expanded = showCaptureModeMenu, onDismissRequest = { showCaptureModeMenu = false }) {
+                CameraOutputMode.entries.forEach { mode ->
+                    DropdownMenuItem(
+                        text = { Text(mode.title) },
+                        enabled = (pdfPages.isEmpty() && !isFinalizingPdf) || mode == captureMode,
+                        onClick = { captureMode = mode; showCaptureModeMenu = false },
+                    )
+                }
+            }
+        }
+    }
+    val pdfSettingsBtn: @Composable () -> Unit = {
+        if (captureMode.isPdf) {
+            PButton(
+                onClick = { showPdfSettings = true },
+                enabled = !isFinalizingPdf && (captureMode != CameraOutputMode.PDF_MULTI_PAGE || pdfPages.isEmpty()),
+            ) { Text("Сжатие PDF: ${pdfCodec.title}", color = Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+        }
+    }
+    val pdfSessionControls: @Composable () -> Unit = {
+        if (captureMode == CameraOutputMode.PDF_MULTI_PAGE) {
+            PText("Страниц в документе: ${pdfPages.size}", color = Color.White, style = MaterialTheme.typography.bodySmall)
+            if (pdfSessionLimitReached) {
+                PText("Достигнут лимит PDF-сессии. Завершите документ или сбросьте черновик.", color = Color(0xFFFF8A80), style = MaterialTheme.typography.bodySmall)
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                PButton(onClick = { finishPdfSession() }, enabled = pdfPages.isNotEmpty() && !isFinalizingPdf && !controller.busy) {
+                    Text(if (isFinalizingPdf) "Собираю PDF…" else "Завершить PDF", color = Color.White)
+                }
+                PButton(onClick = { showDiscardPdfPrompt = true }, enabled = pdfPages.isNotEmpty() && !isFinalizingPdf && !controller.busy) {
+                    Text("Сбросить", color = Color(0xFFFF8A80))
+                }
+            }
+        }
     }
     val diagBtn: @Composable () -> Unit = {
         PButton(onClick = { showDiag = true }) { Text("Диагностика", color = Color.White) }
@@ -326,12 +521,12 @@ fun CameraScreen(angleState: MutableIntState) {
     val infoTexts: @Composable () -> Unit = {
         Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
             if (plan != null) {
-                val o = plan.outputSize
-                val mp = o.width.toLong() * o.height / 1_000_000.0
+                val (width, height) = plan.outputDimensionsForDeviceAngle(angleState.intValue)
+                val mp = width.toLong() * height / 1_000_000.0
                 val crop = if (plan.cropAspect != null) ", кроп" else ""
                 // Нажатие на размер открывает список разрешений
                 PText(
-                    "Снимок: ${o.width}×${o.height} (${"%.1f".format(mp)} Мп$crop) ▾",
+                    "Снимок: ${width}×${height} (${"%.1f".format(mp)} Мп$crop) ▾",
                     color = Color.White,
                     style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier.clickable { showResDialog = true },
@@ -343,7 +538,7 @@ fun CameraScreen(angleState: MutableIntState) {
                 } else "Исходная папка не выбрана: выберите её в Persistor",
                 color = Color.LightGray,
                 style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.clickable(enabled = targets.size > 1) { targetIdx++ },
+                modifier = Modifier.clickable(enabled = targets.size > 1 && !controller.busy && pdfPages.isEmpty() && !isFinalizingPdf) { targetIdx++ },
             )
             lastSaved?.let {
                 PText("Сохранено: $it · всего: $savedCount", color = Color(0xFF9CCC65), style = MaterialTheme.typography.bodySmall)
@@ -360,11 +555,11 @@ fun CameraScreen(angleState: MutableIntState) {
         )
     }
     val thumb: @Composable () -> Unit = {
-        val last = shots.lastOrNull()
+        val last = shots.firstOrNull()
         Box(
             Modifier.size(56.dp).clip(RoundedCornerShape(8.dp)).background(Color.DarkGray)
                 .framed(RoundedCornerShape(8.dp))
-                .clickable(enabled = last != null) { reviewIdx = shots.lastIndex }
+                .clickable(enabled = last != null) { reviewIdx = 0 }
         ) {
             if (last != null) {
                 AsyncImage(
@@ -383,7 +578,14 @@ fun CameraScreen(angleState: MutableIntState) {
             !hasPermission -> Text("Нужно разрешение на камеру", color = Color.White)
             plan == null -> Text(planError ?: "Камеры не найдены", color = Color.White)
             else -> {
-                val aspect = if (landscape) 1f / plan.uprightAspect else plan.uprightAspect
+                val outputDimensions = plan.outputDimensionsForDeviceAngle(angleState.intValue)
+                val previewCropAspect = if (plan.resolution is Resolution.Custom) {
+                    outputDimensions.first.toFloat() / outputDimensions.second
+                } else {
+                    plan.cropAspect
+                }
+                val aspect = if (plan.resolution is Resolution.Custom) previewCropAspect!!
+                    else if (landscape) 1f / plan.uprightAspect else plan.uprightAspect
                 BoxWithConstraints(Modifier.aspectRatio(aspect)) {
                     AndroidView(
                         factory = { c ->
@@ -423,7 +625,7 @@ fun CameraScreen(angleState: MutableIntState) {
                             }
                         }
                     ) {
-                        val ca = planHolder.value?.cropAspect
+                        val ca = previewCropAspect
                         if (ca != null) {
                             val w = size.width
                             val h = size.height
@@ -446,7 +648,7 @@ fun CameraScreen(angleState: MutableIntState) {
                     if (overlaySettings.enabled) {
                         val stampLines = CameraOverlayRenderer.lines(overlaySettings, overlayPreviewTime)
                         if (stampLines.isNotEmpty()) {
-                            val ca = plan.cropAspect
+                            val ca = previewCropAspect
                             val viewAspect = maxWidth.value / maxHeight.value
                             val cropWidth = if (ca == null || ca > viewAspect) maxWidth else maxHeight * ca
                             val cropHeight = if (ca == null || ca <= viewAspect) maxHeight else maxWidth / ca
@@ -503,6 +705,9 @@ fun CameraScreen(angleState: MutableIntState) {
                         flashBtn()
                         focusBtn()
                         overlayBtn()
+                        captureModeBtn()
+                        pdfSettingsBtn()
+                        pdfSessionControls()
                         cleanSw()
                         Spacer(Modifier.height(8.dp))
                         infoTexts()
@@ -537,6 +742,14 @@ fun CameraScreen(angleState: MutableIntState) {
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     infoTexts()
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.weight(1f)) { captureModeBtn() }
+                        if (captureMode.isPdf) {
+                            Spacer(Modifier.width(6.dp))
+                            pdfSettingsBtn()
+                        }
+                    }
+                    pdfSessionControls()
                     Spacer(Modifier.height(8.dp))
                     // Кнопка спуска справа внизу
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -554,7 +767,7 @@ fun CameraScreen(angleState: MutableIntState) {
             ReviewScreen(
                 shots = shots,
                 index = ri,
-                onIndex = { reviewIdx = it },
+                onIndex = { reviewIdx = it.coerceIn(0, shots.lastIndex) },
                 onClose = { reviewIdx = null },
                 onDelete = { u ->
                     runCatching { DocumentFile.fromSingleUri(ctx, u)?.delete() }
@@ -601,6 +814,97 @@ fun CameraScreen(angleState: MutableIntState) {
             onDismiss = { showOverlayDialog = false },
         )
     }
+    if (showPdfSettings) {
+        PdfSettingsDialog(
+            codec = pdfCodec,
+            quality = pdfQuality,
+            locked = (captureMode == CameraOutputMode.PDF_MULTI_PAGE && pdfPages.isNotEmpty()) || controller.busy || isFinalizingPdf,
+            onCodec = { pdfCodec = it },
+            onQuality = { pdfQuality = it },
+            onDismiss = { showPdfSettings = false },
+        )
+    }
+    if (showDiscardPdfPrompt) {
+        AlertDialog(
+            onDismissRequest = { showDiscardPdfPrompt = false },
+            title = { Text("Удалить черновик PDF?") },
+            text = { Text("Будут удалены все ${pdfPages.size} временных страниц. Файл PDF создан не будет.") },
+            confirmButton = {
+                PButton(onClick = { discardPdfSession() }) { Text("Удалить страницы", color = Color(0xFFFF8A80)) }
+            },
+            dismissButton = { PButton(onClick = { showDiscardPdfPrompt = false }) { Text("Продолжить") } },
+        )
+    }
+    if (showExitPdfPrompt) {
+        AlertDialog(
+            onDismissRequest = { showExitPdfPrompt = false },
+            title = { Text("PDF ещё не сохранён") },
+            text = { Text("В документе ${pdfPages.size} страниц. Перед выходом сохраните его или удалите черновик.") },
+            confirmButton = {
+                PButton(onClick = { showExitPdfPrompt = false; finishPdfSession(exitAfterSave = true) }) {
+                    Text("Сохранить и выйти")
+                }
+            },
+            dismissButton = {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    PButton(onClick = { showExitPdfPrompt = false }) { Text("Остаться") }
+                    PButton(onClick = { discardPdfSession(); activity.finish() }) {
+                        Text("Удалить и выйти", color = Color(0xFFFF8A80))
+                    }
+                }
+            },
+        )
+    }
+}
+
+@Composable
+private fun PdfSettingsDialog(
+    codec: PdfJpegCodec,
+    quality: Int,
+    locked: Boolean,
+    onCodec: (PdfJpegCodec) -> Unit,
+    onQuality: (Int) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var codecMenu by remember { mutableStateOf(false) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Сжатие страниц PDF") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "Страницы сохраняются как стандартный JPEG внутри PDF. Выберите кодек и качество; это не меняет обычный режим фото.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Box {
+                    PButton(onClick = { codecMenu = true }, enabled = !locked) {
+                        Text("Кодек: ${codec.title}", color = Color.White)
+                    }
+                    DropdownMenu(expanded = codecMenu, onDismissRequest = { codecMenu = false }) {
+                        PdfJpegCodec.entries.forEach { option ->
+                            DropdownMenuItem(
+                                text = { Text(option.title) },
+                                onClick = { onCodec(option); codecMenu = false },
+                                enabled = !locked,
+                            )
+                        }
+                    }
+                }
+                Text("Качество: $quality", style = MaterialTheme.typography.bodyMedium)
+                Slider(
+                    value = quality.toFloat(),
+                    onValueChange = { onQuality((it + 0.5f).toInt().coerceIn(60, 100)) },
+                    valueRange = 60f..100f,
+                    steps = 39,
+                    enabled = !locked,
+                )
+                if (locked) {
+                    Text("Параметры зафиксированы до завершения текущего многостраничного PDF.", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        },
+        confirmButton = { PButton(onClick = onDismiss) { Text("Готово") } },
+    )
 }
 
 private fun CameraOverlayPosition.previewAlignment(): Alignment = when (this) {
@@ -816,6 +1120,8 @@ private fun ReviewScreen(
     var scale by remember(uri) { mutableFloatStateOf(1f) }
     var offset by remember(uri) { mutableStateOf(Offset.Zero) }
     var confirm by remember { mutableStateOf(false) }
+    val currentScale = rememberUpdatedState(scale)
+    val swipeThresholdPx = with(LocalDensity.current) { 56.dp.toPx() }
     val sizeKb = remember(uri) { (DocumentFile.fromSingleUri(ctx, uri)?.length() ?: 0L) / 1024 }
 
     Box(Modifier.fillMaxSize().background(Color.Black).systemBarsPadding()) {
@@ -829,6 +1135,39 @@ private fun ReviewScreen(
                         scale = if (scale > 1f) 1f else 3f
                         offset = Offset.Zero
                     })
+                }
+                .pointerInput(uri, index, shots.size) {
+                    awaitEachGesture {
+                        val down = awaitFirstDown(pass = PointerEventPass.Initial, requireUnconsumed = false)
+                        var movement = Offset.Zero
+                        var horizontalSwipeAllowed = currentScale.value <= 1.01f
+                        var pageChanged = false
+                        while (true) {
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                            val pressed = event.changes.filter { it.pressed }
+                            if (pressed.isEmpty()) break
+                            if (pressed.size != 1) {
+                                horizontalSwipeAllowed = false
+                                continue
+                            }
+                            val change = pressed.firstOrNull { it.id == down.id }
+                            if (change == null) {
+                                horizontalSwipeAllowed = false
+                                continue
+                            }
+                            val delta = change.position - change.previousPosition
+                            movement += delta
+                            if (abs(movement.y) > viewConfiguration.touchSlop && abs(movement.y) > abs(movement.x)) {
+                                horizontalSwipeAllowed = false
+                            }
+                            if (!pageChanged && horizontalSwipeAllowed && currentScale.value <= 1.01f &&
+                                abs(movement.x) >= swipeThresholdPx && abs(movement.x) > abs(movement.y) * 1.2f
+                            ) {
+                                reviewIndexAfterHorizontalSwipe(index, shots.size, movement.x)?.let(onIndex)
+                                pageChanged = true
+                            }
+                        }
+                    }
                 }
                 .pointerInput(uri) {
                     detectTransformGestures { _, pan, zoom, _ ->
@@ -854,7 +1193,7 @@ private fun ReviewScreen(
         ) {
             PButton(onClick = { onIndex(index - 1) }, enabled = index > 0) { Text("◀", color = Color.White) }
             Spacer(Modifier.weight(1f))
-            PText("Двойное касание: увеличить", color = Color.LightGray, style = MaterialTheme.typography.bodySmall)
+            PText("Свайп: листать · двойное касание: увеличить", color = Color.LightGray, style = MaterialTheme.typography.bodySmall)
             Spacer(Modifier.weight(1f))
             PButton(onClick = { onIndex(index + 1) }, enabled = index < shots.lastIndex) { Text("▶", color = Color.White) }
         }

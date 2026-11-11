@@ -31,7 +31,7 @@ void mozJpegErrorExit(j_common_ptr cinfo) {
 }  // namespace
 
 extern "C" JNIEXPORT jbyteArray JNICALL
-Java_com_persistor_NativeImageEncoder_nativeEncodeMozJpeg(JNIEnv* env, jobject /* receiver */, jobject bitmap, jint quality) {
+Java_com_persistor_NativeImageEncoder_nativeEncodeMozJpeg(JNIEnv* env, jobject /* receiver */, jobject bitmap, jint quality, jboolean progressive) {
     if (quality < 1 || quality > 100) {
         persistor_native::Throw(env, "java/lang/IllegalArgumentException", "MozJPEG quality must be between 1 and 100");
         return nullptr;
@@ -68,9 +68,9 @@ Java_com_persistor_NativeImageEncoder_nativeEncodeMozJpeg(JNIEnv* env, jobject /
     jpeg_set_defaults(&compressor);
     jpeg_set_quality(&compressor, quality, TRUE);
     compressor.optimize_coding = TRUE;
-    // Progressive JPEG remains a standard JPEG stream; ordinary Android/desktop
-    // decoders can display it progressively and it stays compatible with .jpg.
-    jpeg_simple_progression(&compressor);
+    // Keep ordinary MozJPEG output progressive. PDF image streams request baseline
+    // sequential JPEG for the widest reader compatibility.
+    if (progressive == JNI_TRUE) jpeg_simple_progression(&compressor);
     jpeg_start_compress(&compressor, TRUE);
 
     while (compressor.next_scanline < compressor.image_height) {

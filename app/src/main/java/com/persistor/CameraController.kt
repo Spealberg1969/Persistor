@@ -88,6 +88,7 @@ class CameraController(
     private val context: Context,
     private val onError: (String) -> Unit,
     private val onSaved: (String, Uri) -> Unit,
+    private val onPdfCaptured: (ByteArray, CameraOutputMode, () -> Unit) -> Unit,
 ) {
     private val manager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
     private val thread = HandlerThread("persistor-camera").apply { start() }
@@ -112,9 +113,13 @@ class CameraController(
     private var active = false
     private var gen = 0
 
+    @Volatile var outputMode: CameraOutputMode = CameraOutputMode.PHOTO
     @Volatile private var torch = false
     @Volatile private var clean = true
+    @Volatile private var latestDeviceAngle = 0
     @Volatile private var pendingAngle = 0
+    @Volatile private var pendingOutputDimensions: Pair<Int, Int>? = null
+    @Volatile private var pendingOutputMode: CameraOutputMode = CameraOutputMode.PHOTO
     @Volatile var overlaySettings: CameraOverlaySettings = CameraOverlaySettings()
     @Volatile private var pendingOverlaySettings = CameraOverlaySettings()
     @Volatile private var pendingCaptureTime = 0L
@@ -515,12 +520,19 @@ class CameraController(
     }
 
     /** deviceAngle: положение телефона по датчику (0/90/180/270), не зависит от автоповорота экрана. */
+    fun updateDeviceAngle(deviceAngle: Int) {
+        latestDeviceAngle = deviceAngle.mod(360)
+    }
+
     fun takePicture(deviceAngle: Int) {
         val s = session ?: return
         val b = previewBuilder ?: return
         if (busy) return
         busy = true
-        pendingAngle = deviceAngle
+        pendingOutputMode = outputMode
+        updateDeviceAngle(deviceAngle)
+        pendingAngle = latestDeviceAngle
+        pendingOutputDimensions = planInUse?.outputDimensionsForDeviceAngle(pendingAngle)
         pendingOverlaySettings = overlaySettings
         pendingCaptureTime = System.currentTimeMillis()
         waitingLock = true
@@ -542,11 +554,14 @@ class CameraController(
         val r = reader
         if (dev == null || s == null || r == null) { busy = false; return }
         try {
+            // The autofocus wait can span a physical rotation; use the most recent sensor angle.
+            pendingAngle = latestDeviceAngle
+            pendingOutputDimensions = planInUse?.outputDimensionsForDeviceAngle(pendingAngle)
             val b = dev.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
             b.addTarget(r.surface)
             applyCommon(b)
             b.set(CaptureRequest.JPEG_QUALITY, 100.toByte())
-            b.set(CaptureRequest.JPEG_ORIENTATION, ((planInUse?.sensorOrientation ?: 90) + pendingAngle + 360) % 360)
+            b.set(CaptureRequest.JPEG_ORIENTATION, jpegOrientationDegrees(planInUse?.sensorOrientation ?: 90, pendingAngle))
             s.capture(b.build(), object : CameraCaptureSession.CaptureCallback() {
                 override fun onCaptureCompleted(session: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
                     unlockFocus()
@@ -586,24 +601,37 @@ class CameraController(
         } finally {
             image.close()
         }
+        var deferredBusyReset = false
         try {
             val plan = planInUse
             val out = if (plan != null && plan.resolution is Resolution.Custom) {
                 try {
-                    PhotoProcessor.cropResize(bytes, plan.outputSize.width, plan.outputSize.height)
+                    val (targetWidth, targetHeight) = pendingOutputDimensions
+                        ?: (plan.outputSize.width to plan.outputSize.height)
+                    PhotoProcessor.cropResize(bytes, targetWidth, targetHeight)
                 } catch (e: Throwable) {
                     onError("Не удалось обработать снимок: ${e.message}")
                     bytes
                 }
             } else bytes
             val stamped = CameraOverlayRenderer.applyToJpeg(out, pendingOverlaySettings, pendingCaptureTime)
-            save(stamped)
+            if (pendingOutputMode.isPdf) {
+                deferredBusyReset = true
+                try {
+                    onPdfCaptured(stamped, pendingOutputMode) { busy = false }
+                } catch (failure: Throwable) {
+                    deferredBusyReset = false
+                    throw failure
+                }
+            } else {
+                save(stamped)
+            }
         } catch (e: OutOfMemoryError) {
             onError("Не хватило памяти для обработки снимка. Файл не сохранён.")
         } catch (e: Exception) {
             onError("Не удалось обработать снимок: ${e.message ?: e.javaClass.simpleName}")
         } finally {
-            busy = false
+            if (!deferredBusyReset) busy = false
         }
     }
 
