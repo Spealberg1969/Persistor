@@ -115,6 +115,9 @@ class CameraController(
     @Volatile private var torch = false
     @Volatile private var clean = true
     @Volatile private var pendingAngle = 0
+    @Volatile var overlaySettings: CameraOverlaySettings = CameraOverlaySettings()
+    @Volatile private var pendingOverlaySettings = CameraOverlaySettings()
+    @Volatile private var pendingCaptureTime = 0L
     @Volatile private var waitingLock = false
     @Volatile private var focusRect: MeteringRectangle? = null
 
@@ -518,6 +521,8 @@ class CameraController(
         if (busy) return
         busy = true
         pendingAngle = deviceAngle
+        pendingOverlaySettings = overlaySettings
+        pendingCaptureTime = System.currentTimeMillis()
         waitingLock = true
         try {
             b.set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_START)
@@ -591,7 +596,12 @@ class CameraController(
                     bytes
                 }
             } else bytes
-            save(out)
+            val stamped = CameraOverlayRenderer.applyToJpeg(out, pendingOverlaySettings, pendingCaptureTime)
+            save(stamped)
+        } catch (e: OutOfMemoryError) {
+            onError("Не хватило памяти для обработки снимка. Файл не сохранён.")
+        } catch (e: Exception) {
+            onError("Не удалось обработать снимок: ${e.message ?: e.javaClass.simpleName}")
         } finally {
             busy = false
         }

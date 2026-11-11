@@ -157,6 +157,7 @@ fun CameraScreen(angleState: MutableIntState) {
     val store = remember { FolderStore(appCtx) }
     val repo = remember { ImageRepository(appCtx) }
     val sources by store.sources.collectAsState(initial = emptySet())
+    val overlaySettings by store.cameraOverlay.collectAsState(initial = CameraOverlaySettings())
     val targets = remember(sources) { sources.sortedBy { it.toString() } }
     var targetIdx by remember { mutableIntStateOf(0) }
     val target: Uri? = if (targets.isEmpty()) null else targets[targetIdx % targets.size]
@@ -177,6 +178,8 @@ fun CameraScreen(angleState: MutableIntState) {
     var showDiag by remember { mutableStateOf(false) }
     var showResDialog by remember { mutableStateOf(false) }
     var showCustomDialog by remember { mutableStateOf(false) }
+    var showOverlayDialog by remember { mutableStateOf(false) }
+    var overlayPreviewTime by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var lensIdx by remember { mutableIntStateOf(-1) }
     var lensMenu by remember { mutableStateOf(false) }
     var focusMark by remember { mutableStateOf<Offset?>(null) }
@@ -195,7 +198,10 @@ fun CameraScreen(angleState: MutableIntState) {
             },
         )
     }
-    SideEffect { controller.saveDir = target }
+    SideEffect {
+        controller.saveDir = target
+        controller.overlaySettings = overlaySettings
+    }
     DisposableEffect(Unit) { onDispose { controller.release() } }
 
     // Объективы: по умолчанию основной (около 23 мм)
@@ -222,6 +228,14 @@ fun CameraScreen(angleState: MutableIntState) {
 
     LaunchedEffect(torch) { controller.setTorch(torch) }
     LaunchedEffect(clean) { controller.setClean(clean) }
+    LaunchedEffect(overlaySettings.enabled, overlaySettings.showDateTime) {
+        if (overlaySettings.enabled && overlaySettings.showDateTime) {
+            while (true) {
+                overlayPreviewTime = System.currentTimeMillis()
+                delay(1000)
+            }
+        }
+    }
     LaunchedEffect(focusMark) {
         if (focusMark != null) {
             delay(1200)
@@ -269,6 +283,11 @@ fun CameraScreen(angleState: MutableIntState) {
     }
     val diagBtn: @Composable () -> Unit = {
         PButton(onClick = { showDiag = true }) { Text("Диагностика", color = Color.White) }
+    }
+    val overlayBtn: @Composable () -> Unit = {
+        PButton(onClick = { showOverlayDialog = true }) {
+            Text(if (overlaySettings.enabled) "Надпись: вкл" else "Надпись: выкл", color = Color.White)
+        }
     }
     val lensBtn: @Composable () -> Unit = {
         Box {
@@ -365,7 +384,7 @@ fun CameraScreen(angleState: MutableIntState) {
             plan == null -> Text(planError ?: "Камеры не найдены", color = Color.White)
             else -> {
                 val aspect = if (landscape) 1f / plan.uprightAspect else plan.uprightAspect
-                Box(Modifier.aspectRatio(aspect)) {
+                BoxWithConstraints(Modifier.aspectRatio(aspect)) {
                     AndroidView(
                         factory = { c ->
                             TextureView(c).apply {
@@ -424,6 +443,37 @@ fun CameraScreen(angleState: MutableIntState) {
                             drawCircle(Color(0xFFFFD54F), radius = 36.dp.toPx(), center = it, style = Stroke(3.dp.toPx()))
                         }
                     }
+                    if (overlaySettings.enabled) {
+                        val stampLines = CameraOverlayRenderer.lines(overlaySettings, overlayPreviewTime)
+                        if (stampLines.isNotEmpty()) {
+                            val ca = plan.cropAspect
+                            val viewAspect = maxWidth.value / maxHeight.value
+                            val cropWidth = if (ca == null || ca > viewAspect) maxWidth else maxHeight * ca
+                            val cropHeight = if (ca == null || ca <= viewAspect) maxHeight else maxWidth / ca
+                            Box(
+                                Modifier.offset((maxWidth - cropWidth) / 2, (maxHeight - cropHeight) / 2)
+                                    .size(cropWidth, cropHeight),
+                                contentAlignment = overlaySettings.position.previewAlignment(),
+                            ) {
+                                Column(
+                                    Modifier.padding(8.dp).widthIn(max = (cropWidth - 16.dp).coerceAtLeast(24.dp))
+                                        .background(Color.Black.copy(alpha = 0.58f), RoundedCornerShape(6.dp))
+                                        .padding(horizontal = 8.dp, vertical = 5.dp),
+                                ) {
+                                    stampLines.forEach { line ->
+                                        Text(
+                                            line,
+                                            color = Color.White,
+                                            fontSize = overlaySettings.fontSizeSp.sp,
+                                            lineHeight = (overlaySettings.fontSizeSp * 1.2f).sp,
+                                            fontFamily = FontFamily.SansSerif,
+                                            fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -452,6 +502,7 @@ fun CameraScreen(angleState: MutableIntState) {
                         lensBtn()
                         flashBtn()
                         focusBtn()
+                        overlayBtn()
                         cleanSw()
                         Spacer(Modifier.height(8.dp))
                         infoTexts()
@@ -476,6 +527,8 @@ fun CameraScreen(angleState: MutableIntState) {
                     }
                     Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                         focusBtn()
+                        Spacer(Modifier.width(8.dp))
+                        overlayBtn()
                     }
                 }
                 Column(
@@ -536,6 +589,110 @@ fun CameraScreen(angleState: MutableIntState) {
             onDismiss = { showCustomDialog = false },
         )
     }
+    if (showOverlayDialog) {
+        CameraOverlayDialog(
+            settings = overlaySettings,
+            onEnabled = { scope.launch { store.setCameraOverlayEnabled(it) } },
+            onDateTime = { scope.launch { store.setCameraOverlayDateTime(it) } },
+            onNameEnabled = { scope.launch { store.setCameraOverlayNameEnabled(it) } },
+            onName = { scope.launch { store.setCameraOverlayName(it) } },
+            onPosition = { scope.launch { store.setCameraOverlayPosition(it) } },
+            onFontSize = { scope.launch { store.setCameraOverlayFontSize(it) } },
+            onDismiss = { showOverlayDialog = false },
+        )
+    }
+}
+
+private fun CameraOverlayPosition.previewAlignment(): Alignment = when (this) {
+    CameraOverlayPosition.TOP_LEFT -> Alignment.TopStart
+    CameraOverlayPosition.TOP_CENTER -> Alignment.TopCenter
+    CameraOverlayPosition.TOP_RIGHT -> Alignment.TopEnd
+    CameraOverlayPosition.CENTER_LEFT -> Alignment.CenterStart
+    CameraOverlayPosition.CENTER -> Alignment.Center
+    CameraOverlayPosition.CENTER_RIGHT -> Alignment.CenterEnd
+    CameraOverlayPosition.BOTTOM_LEFT -> Alignment.BottomStart
+    CameraOverlayPosition.BOTTOM_CENTER -> Alignment.BottomCenter
+    CameraOverlayPosition.BOTTOM_RIGHT -> Alignment.BottomEnd
+}
+
+@Composable
+private fun CameraOverlayDialog(
+    settings: CameraOverlaySettings,
+    onEnabled: (Boolean) -> Unit,
+    onDateTime: (Boolean) -> Unit,
+    onNameEnabled: (Boolean) -> Unit,
+    onName: (String) -> Unit,
+    onPosition: (CameraOverlayPosition) -> Unit,
+    onFontSize: (Int) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var positionMenu by remember { mutableStateOf(false) }
+    var fontSize by remember(settings.fontSizeSp) { mutableFloatStateOf(settings.fontSizeSp.toFloat()) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Надпись на снимке") },
+        text = {
+            Column(
+                Modifier.heightIn(max = 480.dp).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Впечатывать в фото", modifier = Modifier.weight(1f))
+                    Switch(checked = settings.enabled, onCheckedChange = onEnabled)
+                }
+                Text(
+                    "При включении текст становится частью изображения и останется на снимке после сжатия или отправки.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                HorizontalDivider(Modifier.padding(vertical = 2.dp))
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Дата и время", modifier = Modifier.weight(1f))
+                    Checkbox(checked = settings.showDateTime, onCheckedChange = onDateTime)
+                }
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Добавить имя и фамилию", modifier = Modifier.weight(1f))
+                    Checkbox(checked = settings.showName, onCheckedChange = onNameEnabled)
+                }
+                if (settings.showName) {
+                    OutlinedTextField(
+                        value = settings.name,
+                        onValueChange = onName,
+                        label = { Text("Имя и фамилия") },
+                        singleLine = true,
+                        supportingText = { Text("Имя хранится локально; при включённой надписи оно будет видно на снимках.") },
+                        colors = themedFieldColors(),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                Text("Расположение", style = MaterialTheme.typography.titleSmall)
+                Box {
+                    OutlinedButton(onClick = { positionMenu = true }, modifier = Modifier.fillMaxWidth()) {
+                        Text(settings.position.title)
+                    }
+                    DropdownMenu(expanded = positionMenu, onDismissRequest = { positionMenu = false }) {
+                        CameraOverlayPosition.entries.forEach { position ->
+                            DropdownMenuItem(
+                                text = { Text(position.title) },
+                                onClick = { onPosition(position); positionMenu = false },
+                            )
+                        }
+                    }
+                }
+                Text("Размер шрифта: ${fontSize.toInt()} sp", style = MaterialTheme.typography.titleSmall)
+                Slider(
+                    value = fontSize,
+                    onValueChange = { fontSize = it },
+                    onValueChangeFinished = { onFontSize(fontSize.toInt().coerceIn(12, 36)) },
+                    valueRange = 12f..36f,
+                    steps = 23,
+                )
+                Text("Эти настройки применяются к новым снимкам встроенной камеры.", style = MaterialTheme.typography.bodySmall)
+            }
+        },
+        confirmButton = { PButton(onClick = onDismiss) { Text("Готово") } },
+    )
 }
 
 @Composable

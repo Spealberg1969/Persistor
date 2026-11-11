@@ -64,6 +64,12 @@ class FolderStore(private val context: Context) {
     private val HISTORY = stringPreferencesKey("history")
     private val THEME = stringPreferencesKey("theme")
     private val CAM_RES = stringPreferencesKey("camera_res")
+    private val CAM_OVERLAY_ENABLED = booleanPreferencesKey("camera_overlay_enabled")
+    private val CAM_OVERLAY_DATE_TIME = booleanPreferencesKey("camera_overlay_date_time")
+    private val CAM_OVERLAY_NAME_ENABLED = booleanPreferencesKey("camera_overlay_name_enabled")
+    private val CAM_OVERLAY_NAME = stringPreferencesKey("camera_overlay_name")
+    private val CAM_OVERLAY_POSITION = stringPreferencesKey("camera_overlay_position")
+    private val CAM_OVERLAY_FONT_SIZE = androidx.datastore.preferences.core.intPreferencesKey("camera_overlay_font_size")
 
     val sources: Flow<Set<Uri>> = context.dataStore.data
         .map { p -> p[SOURCES].orEmpty().map(Uri::parse).toSet() }
@@ -91,6 +97,16 @@ class FolderStore(private val context: Context) {
 
     val theme: Flow<ThemeMode> = context.dataStore.data.map { p -> ThemeMode.fromKey(p[THEME]) }
     val cameraRes: Flow<String?> = context.dataStore.data.map { p -> p[CAM_RES] }
+    val cameraOverlay: Flow<CameraOverlaySettings> = context.dataStore.data.map { p ->
+        CameraOverlaySettings(
+            enabled = p[CAM_OVERLAY_ENABLED] ?: false,
+            showDateTime = p[CAM_OVERLAY_DATE_TIME] ?: true,
+            showName = p[CAM_OVERLAY_NAME_ENABLED] ?: false,
+            name = p[CAM_OVERLAY_NAME].orEmpty(),
+            position = CameraOverlayPosition.fromKey(p[CAM_OVERLAY_POSITION]),
+            fontSizeSp = (p[CAM_OVERLAY_FONT_SIZE] ?: 18).coerceIn(12, 36),
+        )
+    }
 
     val quickMode: Flow<Boolean> = context.dataStore.data.map { p -> p[QUICK] ?: false }
 
@@ -132,6 +148,14 @@ class FolderStore(private val context: Context) {
     suspend fun setQuickMode(v: Boolean) = context.dataStore.edit { it[QUICK] = v }
     suspend fun setTheme(v: ThemeMode) = context.dataStore.edit { it[THEME] = v.key }
     suspend fun setCameraRes(v: String) = context.dataStore.edit { it[CAM_RES] = v }
+    suspend fun setCameraOverlayEnabled(v: Boolean) = context.dataStore.edit { it[CAM_OVERLAY_ENABLED] = v }
+    suspend fun setCameraOverlayDateTime(v: Boolean) = context.dataStore.edit { it[CAM_OVERLAY_DATE_TIME] = v }
+    suspend fun setCameraOverlayNameEnabled(v: Boolean) = context.dataStore.edit { it[CAM_OVERLAY_NAME_ENABLED] = v }
+    suspend fun setCameraOverlayName(v: String) = context.dataStore.edit { it[CAM_OVERLAY_NAME] = v.take(80) }
+    suspend fun setCameraOverlayPosition(v: CameraOverlayPosition) =
+        context.dataStore.edit { it[CAM_OVERLAY_POSITION] = v.key }
+    suspend fun setCameraOverlayFontSize(v: Int) =
+        context.dataStore.edit { it[CAM_OVERLAY_FONT_SIZE] = v.coerceIn(12, 36) }
 
     // --- Статистика ---
     suspend fun addHistory(entry: HistoryEntry) = context.dataStore.edit { prefs ->
