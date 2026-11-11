@@ -2,6 +2,7 @@ package com.persistor
 
 import java.io.File
 import java.io.RandomAccessFile
+import java.util.concurrent.CancellationException
 import java.util.zip.CRC32
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
@@ -68,6 +69,62 @@ class ArchiveVerifierTest {
                 mapOf("2026-11-10/expected.jpg" to expected.size.toLong()),
             )
             assertNotNull("Unexpected ZIP entries must be reported", error)
+        }
+    }
+
+    @Test
+    fun emptyArchivePassesWhenNoEntriesAreExpected() {
+        withTempZip { zip ->
+            writeStoredZip(zip, emptyMap())
+
+            assertNull(ArchiveVerifier.verify(zip, emptyMap()))
+        }
+    }
+
+    @Test
+    fun missingArchiveReturnsVerificationError() {
+        withTempZip { zip ->
+            zip.delete()
+
+            assertNotNull("A missing archive must be reported", ArchiveVerifier.verify(zip, emptyMap()))
+        }
+    }
+
+    @Test
+    fun mismatchedExpectedSizeFailsVerification() {
+        withTempZip { zip ->
+            val payload = "sized payload".toByteArray()
+            val entryName = "2026-11-10/document.jpg"
+            writeStoredZip(zip, mapOf(entryName to payload))
+
+            val error = ArchiveVerifier.verify(zip, mapOf(entryName to (payload.size + 1L)))
+            assertNotNull("An entry whose size differs from the expected size must be reported", error)
+        }
+    }
+
+    @Test(expected = CancellationException::class)
+    fun cancellationFromCallbackPropagates() {
+        withTempZip { zip ->
+            val payload = "cancel me".toByteArray()
+            val entryName = "2026-11-10/document.jpg"
+            writeStoredZip(zip, mapOf(entryName to payload))
+
+            ArchiveVerifier.verify(zip, mapOf(entryName to payload.size.toLong())) {
+                throw CancellationException("test cancellation")
+            }
+        }
+    }
+
+    @Test
+    fun directoryEntryFailsVerification() {
+        withTempZip { zip ->
+            ZipOutputStream(zip.outputStream().buffered()).use { output ->
+                output.putNextEntry(ZipEntry("2026-11-10/"))
+                output.closeEntry()
+            }
+
+            val error = ArchiveVerifier.verify(zip, emptyMap())
+            assertNotNull("Directory entries must be reported", error)
         }
     }
 
