@@ -18,7 +18,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
@@ -35,7 +35,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
-import coil.compose.AsyncImage
 import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -94,6 +93,8 @@ fun MainScreen(vm: MainViewModel) {
     val activity = ctx as ComponentActivity
 
     val pickSource = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { it?.let(vm::addSource) }
+    val pickCameraJpg = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { it?.let(vm::setCameraJpgFolder) }
+    val pickCameraPdf = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { it?.let(vm::setCameraPdfFolder) }
     val pickOutput = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { it?.let(vm::setOutput) }
     val pickArchive = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { it?.let(vm::setArchive) }
     val notifPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
@@ -104,8 +105,10 @@ fun MainScreen(vm: MainViewModel) {
     var newEmail by remember { mutableStateOf("") }
     var subjectEdit by remember { mutableStateOf<String?>(null) }
     var formatMenuExpanded by remember { mutableStateOf(false) }
+    var previewIndex by rememberSaveable { mutableIntStateOf(-1) }
 
     BackHandler(enabled = showStats) { showStats = false }
+    BackHandler(enabled = previewIndex >= 0 && !showStats) { previewIndex = -1 }
 
     // Разрешение на уведомления (Android 13+): нужно, чтобы видеть ход обработки
     LaunchedEffect(Unit) {
@@ -114,10 +117,13 @@ fun MainScreen(vm: MainViewModel) {
         ) notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
 
-    // Быстрый режим: отсчёт 5 секунд, затем обработка всех фото
+    // Быстрый режим: отсчёт 5 секунд, затем обработка всех файлов
     var quickHandled by rememberSaveable { mutableStateOf(false) }
     var countdown by remember { mutableStateOf<Int?>(null) }
     val ready = s.output != null && s.archive != null && s.images.isNotEmpty() && !running
+    LaunchedEffect(s.images.size) {
+        if (previewIndex >= s.images.size) previewIndex = -1
+    }
     LaunchedEffect(s.quickMode, ready, quickHandled) {
         if (s.quickMode && ready && !quickHandled) {
             try {
@@ -169,6 +175,16 @@ fun MainScreen(vm: MainViewModel) {
                     POutlinedButton(onClick = { pickSource.launch(null) }) { Text("+ Добавить папку") }
 
                     Spacer(Modifier.height(8.dp))
+                    PText("Папки съёмки", style = MaterialTheme.typography.titleSmall)
+                    FolderRow("Снимки JPG камеры", s.cameraJpgFolder?.let(vm.repo::folderName)) { pickCameraJpg.launch(null) }
+                    FolderRow("Снимки PDF камеры", s.cameraPdfFolder?.let(vm.repo::folderName)) { pickCameraPdf.launch(null) }
+                    Text(
+                        "Эти папки автоматически добавляются в список файлов для просмотра и обработки.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+
+                    Spacer(Modifier.height(8.dp))
                     FolderRow("Сжатые файлы (папка с датой создаётся внутри)", s.output?.let(vm.repo::folderName)) { pickOutput.launch(null) }
                     Spacer(Modifier.height(4.dp))
                     FolderRow("Папка для ZIP", s.archive?.let(vm.repo::folderName)) { pickArchive.launch(null) }
@@ -200,7 +216,11 @@ fun MainScreen(vm: MainViewModel) {
                         CompressionMethod.JPEG_XL -> "Выход .jxl; приложение проверяет его собственной библиотекой, но галереи и старые просмотрщики могут не открыть файл."
                         else -> "Для цветных форматов качество подбирается по SSIM; результат зависит от выбранного кодека."
                     }
-                    Text(formatHint, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        formatHint + if (s.images.any { it.isPdf }) " Готовые PDF копируются без повторного сжатия страниц." else "",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
 
                     Spacer(Modifier.height(8.dp))
                     var sl by remember(s.settings.ssimTarget) { mutableFloatStateOf(s.settings.ssimTarget.toFloat()) }
@@ -213,8 +233,8 @@ fun MainScreen(vm: MainViewModel) {
                         steps = 8,
                     )
                     SwitchRow("Удалять папку со сжатыми файлами после архивации", s.settings.deleteTempFolder, vm::setDeleteTemp)
-                    SwitchRow("Удалять исходные фото после успешной архивации", s.settings.deleteOriginals, vm::setDeleteOriginals)
-                    SwitchRow("Быстрый режим: при запуске обработать все фото (отсчёт 5 с)", s.quickMode, vm::setQuickMode)
+                    SwitchRow("Удалять исходные фото и PDF после успешной архивации", s.settings.deleteOriginals, vm::setDeleteOriginals)
+                    SwitchRow("Быстрый режим: при запуске обработать все файлы (отсчёт 5 с)", s.quickMode, vm::setQuickMode)
 
                     Spacer(Modifier.height(8.dp))
                     PText("Тема", style = MaterialTheme.typography.titleSmall)
@@ -272,7 +292,7 @@ fun MainScreen(vm: MainViewModel) {
             }
 
             Spacer(Modifier.height(8.dp))
-            PText("Изображений: ${s.images.size}, выбрано: ${s.selected.size}")
+            PText("Файлов (изображения и PDF): ${s.images.size}, выбрано: ${s.selected.size}")
             Spacer(Modifier.height(4.dp))
 
             // Сетка миниатюр, поверх неё в правом нижнем углу круглая кнопка камеры
@@ -283,11 +303,10 @@ fun MainScreen(vm: MainViewModel) {
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
-                    items(s.images, key = { it.uri.toString() }) { img ->
-                        Box(Modifier.aspectRatio(1f).clickable { vm.toggle(img.uri) }) {
-                            AsyncImage(
-                                model = img.uri,
-                                contentDescription = img.name,
+                    itemsIndexed(s.images, key = { _, item -> item.uri.toString() }) { index, img ->
+                        Box(Modifier.aspectRatio(1f).clickable { previewIndex = index }) {
+                            FileThumbnail(
+                                item = img,
                                 contentScale = ContentScale.Crop,
                                 modifier = Modifier.fillMaxSize(),
                             )
@@ -330,11 +349,20 @@ fun MainScreen(vm: MainViewModel) {
         }
     }
 
+    if (!showStats && previewIndex in s.images.indices) {
+        FullScreenMediaViewer(
+            items = s.images,
+            index = previewIndex,
+            onIndex = { previewIndex = it.coerceIn(0, s.images.lastIndex) },
+            onClose = { previewIndex = -1 },
+        )
+    }
+
     if (confirmDelete) {
         AlertDialog(
             onDismissRequest = { confirmDelete = false },
-            title = { Text("Удалить исходные фото?") },
-            text = { Text("После создания и проверки архива исходные фото будут удалены безвозвратно.") },
+            title = { Text("Удалить исходные файлы?") },
+            text = { Text("После создания и проверки архива исходные изображения и PDF будут удалены безвозвратно.") },
             confirmButton = { PButton(onClick = { confirmDelete = false; vm.process() }) { Text("Продолжить") } },
             dismissButton = { PButton(onClick = { confirmDelete = false }) { Text("Отмена") } },
         )
@@ -344,7 +372,7 @@ fun MainScreen(vm: MainViewModel) {
         AlertDialog(
             onDismissRequest = {},
             title = { Text("Быстрый режим") },
-            text = { Text("Обработка всех ${s.images.size} фото начнётся через $c с") },
+            text = { Text("Обработка всех ${s.images.size} файлов начнётся через $c с") },
             confirmButton = { PButton(onClick = { quickHandled = true }) { Text("Отмена") } },
         )
     }
@@ -417,7 +445,7 @@ private fun resultText(r: ProcessResult): String = when (r) {
         appendLine("Архив: ${r.zipName}")
         appendLine("Файлов: ${r.files}")
         appendLine("Было: ${mb(r.originalBytes)} → архив: ${mb(r.zipSize)}")
-        if (r.deletedOriginals > 0) appendLine("Удалено исходных фото: ${r.deletedOriginals}")
+        if (r.deletedOriginals > 0) appendLine("Удалено исходных файлов: ${r.deletedOriginals}")
         if (r.zipSize > 17L * 1048576) appendLine("\n⚠ Архив больше 17 МБ, Gmail может его не принять.")
         r.warnings.forEach { appendLine("• $it") }
     }.trim()

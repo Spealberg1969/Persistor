@@ -167,11 +167,11 @@ fun CameraScreen(angleState: MutableIntState) {
 
     val store = remember { FolderStore(appCtx) }
     val repo = remember { ImageRepository(appCtx) }
-    val sources by store.sources.collectAsState(initial = emptySet())
+    val cameraJpgFolder by store.cameraJpgFolder.collectAsState(initial = null)
+    val cameraPdfFolder by store.cameraPdfFolder.collectAsState(initial = null)
     val overlaySettings by store.cameraOverlay.collectAsState(initial = CameraOverlaySettings())
-    val targets = remember(sources) { sources.sortedBy { it.toString() } }
-    var targetIdx by remember { mutableIntStateOf(0) }
-    val target: Uri? = if (targets.isEmpty()) null else targets[targetIdx % targets.size]
+    var captureMode by remember { mutableStateOf(CameraOutputMode.PHOTO) }
+    val target: Uri? = if (captureMode.isPdf) cameraPdfFolder else cameraJpgFolder
 
     var hasPermission by remember {
         mutableStateOf(ContextCompat.checkSelfPermission(ctx, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)
@@ -182,7 +182,7 @@ fun CameraScreen(angleState: MutableIntState) {
     var errorText by remember { mutableStateOf<String?>(null) }
     var savedCount by remember { mutableIntStateOf(0) }
     var lastSaved by remember { mutableStateOf<String?>(null) }
-    val shots = remember { mutableStateListOf<Uri>() }
+    val shots = remember { mutableStateListOf<ImageItem>() }
     var reviewIdx by remember { mutableStateOf<Int?>(null) }
     var torch by remember { mutableStateOf(false) }
     var clean by remember { mutableStateOf(true) }
@@ -190,7 +190,6 @@ fun CameraScreen(angleState: MutableIntState) {
     var showResDialog by remember { mutableStateOf(false) }
     var showCustomDialog by remember { mutableStateOf(false) }
     var showOverlayDialog by remember { mutableStateOf(false) }
-    var captureMode by remember { mutableStateOf(CameraOutputMode.PHOTO) }
     var showCaptureModeMenu by remember { mutableStateOf(false) }
     var showPdfSettings by remember { mutableStateOf(false) }
     var pdfCodec by remember { mutableStateOf(PdfJpegCodec.ANDROID_JPEG) }
@@ -214,11 +213,11 @@ fun CameraScreen(angleState: MutableIntState) {
         reviewIdx = null
         shots.clear()
         val folder = target ?: return@LaunchedEffect
-        val existing = repo.list(setOf(folder)).map { it.uri }
+        val existing = repo.list(setOf(folder))
         if (target == folder) {
             val capturedWhileLoading = shots.toList()
             shots.clear()
-            shots.addAll((capturedWhileLoading + existing).distinct())
+            shots.addAll((capturedWhileLoading + existing).distinctBy { it.uri.toString() })
         }
     }
 
@@ -231,8 +230,10 @@ fun CameraScreen(angleState: MutableIntState) {
                     savedCount++
                     lastSaved = name
                     errorText = null
-                    shots.remove(uri)
-                    shots.add(0, uri)
+                    repo.item(uri)?.let { item ->
+                        shots.removeAll { it.uri == uri }
+                        shots.add(0, item)
+                    }
                 }
             },
             onPdfCaptured = { bytes, mode, complete ->
@@ -257,6 +258,10 @@ fun CameraScreen(angleState: MutableIntState) {
                                 val saved = withContext(Dispatchers.IO) {
                                     PdfDocumentWriter.write(listOf(page), outputPdf)
                                     savePdfToTree(appCtx, outputFolder, outputPdf)
+                                }
+                                repo.item(saved.second)?.let { item ->
+                                    shots.removeAll { it.uri == item.uri }
+                                    shots.add(0, item)
                                 }
                                 lastSaved = "PDF: ${saved.first}"
                                 errorText = null
@@ -407,6 +412,10 @@ fun CameraScreen(angleState: MutableIntState) {
                     PdfDocumentWriter.write(pagesToWrite, temporaryPdf)
                     savePdfToTree(appCtx, outputFolder, temporaryPdf)
                 }
+                repo.item(saved.second)?.let { item ->
+                    shots.removeAll { it.uri == item.uri }
+                    shots.add(0, item)
+                }
                 lastSaved = "PDF: ${saved.first}"
                 errorText = null
                 savedCount++
@@ -534,11 +543,10 @@ fun CameraScreen(angleState: MutableIntState) {
             }
             PText(
                 if (target != null) {
-                    "Папка: ${repo.folderName(target)}" + if (targets.size > 1) " (нажмите, чтобы сменить)" else ""
-                } else "Исходная папка не выбрана: выберите её в Persistor",
+                    "Папка ${if (captureMode.isPdf) "PDF" else "JPG"}: ${repo.folderName(target)}"
+                } else "Папка для съёмки ${if (captureMode.isPdf) "PDF" else "JPG"} не выбрана: откройте Настройки Persistor",
                 color = Color.LightGray,
                 style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.clickable(enabled = targets.size > 1 && !controller.busy && pdfPages.isEmpty() && !isFinalizingPdf) { targetIdx++ },
             )
             lastSaved?.let {
                 PText("Сохранено: $it · всего: $savedCount", color = Color(0xFF9CCC65), style = MaterialTheme.typography.bodySmall)
@@ -562,9 +570,8 @@ fun CameraScreen(angleState: MutableIntState) {
                 .clickable(enabled = last != null) { reviewIdx = 0 }
         ) {
             if (last != null) {
-                AsyncImage(
-                    model = last,
-                    contentDescription = "Последний снимок",
+                FileThumbnail(
+                    item = last,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize(),
                 )
@@ -764,15 +771,15 @@ fun CameraScreen(angleState: MutableIntState) {
 
         val ri = reviewIdx
         if (ri != null && ri in shots.indices) {
-            ReviewScreen(
-                shots = shots,
+            FullScreenMediaViewer(
+                items = shots,
                 index = ri,
                 onIndex = { reviewIdx = it.coerceIn(0, shots.lastIndex) },
                 onClose = { reviewIdx = null },
-                onDelete = { u ->
-                    runCatching { DocumentFile.fromSingleUri(ctx, u)?.delete() }
-                    val i = shots.indexOf(u)
-                    shots.remove(u)
+                onDelete = { item ->
+                    runCatching { DocumentFile.fromSingleUri(ctx, item.uri)?.delete() }
+                    val i = shots.indexOf(item)
+                    shots.remove(item)
                     reviewIdx = if (shots.isEmpty()) null else i.coerceIn(0, shots.lastIndex)
                 },
             )
@@ -1126,7 +1133,7 @@ private fun ReviewScreen(
 
     Box(Modifier.fillMaxSize().background(Color.Black).systemBarsPadding()) {
         AsyncImage(
-            model = ImageRequest.Builder(ctx).data(uri).size(coil.size.Size.ORIGINAL).allowHardware(false).build(),
+            model = ImageRequest.Builder(ctx).data(uri).size(2048, 3072).allowHardware(false).build(),
             contentDescription = null,
             contentScale = ContentScale.Fit,
             modifier = Modifier.fillMaxSize()

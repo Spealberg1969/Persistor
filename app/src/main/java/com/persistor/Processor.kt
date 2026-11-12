@@ -52,6 +52,9 @@ data class ProcessSettings(
 
 data class ProcessProgress(val running: Boolean = false, val message: String = "", val current: Int = 0, val total: Int = 0)
 
+internal fun archiveZipName(folderName: String, includesPdf: Boolean): String =
+    "$folderName${if (includesPdf) "_pdf" else ""}.zip"
+
 sealed interface ProcessResult {
     data class Success(
         val zipName: String,
@@ -83,9 +86,9 @@ class Processor(private val context: Context) {
         } catch (e: CancellationException) {
             throw e
         } catch (e: OutOfMemoryError) {
-            ProcessResult.Failure("Не хватило памяти на обработку большого снимка. Исходные фото не тронуты.")
+            ProcessResult.Failure("Не хватило памяти на обработку файла. Исходные файлы не тронуты.")
         } catch (e: Exception) {
-            ProcessResult.Failure("Ошибка: ${e.message ?: e.javaClass.simpleName}. Исходные фото не тронуты.")
+            ProcessResult.Failure("Ошибка: ${e.message ?: e.javaClass.simpleName}. Исходные файлы не тронуты.")
         }
     }
 
@@ -106,9 +109,10 @@ class Processor(private val context: Context) {
 
         // Имя папки/архива: текущая дата; при повторном запуске в тот же день — _2, _3...
         val date = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+        val includesPdf = images.any { it.isPdf }
         var n = 1
         fun nameFor(i: Int) = if (i == 1) date else "${date}_$i"
-        while (outRoot.findFile(nameFor(n)) != null || arcRoot.findFile("${nameFor(n)}.zip") != null) n++
+        while (outRoot.findFile(nameFor(n)) != null || arcRoot.findFile(archiveZipName(nameFor(n), includesPdf)) != null) n++
         val folderName = nameFor(n)
 
         val folder = outRoot.createDirectory(folderName)
@@ -120,7 +124,14 @@ class Processor(private val context: Context) {
         var originalBytes = 0L
         for ((index, img) in images.withIndex()) {
             currentCoroutineContext().ensureActive()
-            onProgress("Сжатие ${index + 1}/${images.size}: ${img.name}", index, images.size)
+            onProgress("${if (img.isPdf) "Добавление PDF" else "Сжатие"} ${index + 1}/${images.size}: ${img.name}", index, images.size)
+
+            if (img.isPdf) {
+                val (pdfName, copiedBytes) = copyPdfIntoOutput(img, folder)
+                written += pdfName to copiedBytes
+                originalBytes += img.size
+                continue
+            }
 
             val encoded = compressOne(img.uri, img.name, st, warnings)
             var bytes = encoded.bytes
@@ -146,57 +157,62 @@ class Processor(private val context: Context) {
 
         // 2. ZIP
         onProgress("Создание архива…", images.size, images.size)
-        val zipName = "$folderName.zip"
+        val zipName = archiveZipName(folderName, includesPdf)
         val zipDoc = arcRoot.createFile("application/zip", zipName)
             ?: return ProcessResult.Failure("Не удалось создать архив $zipName")
-        val zipStream = resolver.openOutputStream(zipDoc.uri)
-            ?: return ProcessResult.Failure("Не удалось записать архив $zipName")
-        ZipOutputStream(BufferedOutputStream(zipStream)).use { zip ->
-            zip.setLevel(Deflater.NO_COMPRESSION) // JPEG всё равно не сжимается
-            val files = folder.listFiles().filter { it.isFile }.sortedBy { it.name }
-            for (f in files) {
-                currentCoroutineContext().ensureActive()
-                zip.putNextEntry(ZipEntry("$folderName/${f.name}"))
-                resolver.openInputStream(f.uri)?.use { it.copyTo(zip) }
-                zip.closeEntry()
-            }
-        }
-
-        // 3. Проверка архива через ZipFile: наличие, размер и CRC каждого файла.
-        // Архив SAF-каталога временно копируется в cache, а содержимое читается потоково.
-        onProgress("Проверка архива…", images.size, images.size)
-        val activeContext = currentCoroutineContext()
-        val verifyFile = File.createTempFile("persistor-verify-", ".zip", context.cacheDir)
-        val verificationError = try {
-            val zipIn = resolver.openInputStream(zipDoc.uri)
-                ?: error("Не удалось открыть архив для проверки")
-            zipIn.use { input ->
-                verifyFile.outputStream().buffered().use { output ->
-                    val buffer = ByteArray(64 * 1024)
-                    while (true) {
-                        activeContext.ensureActive()
-                        val count = input.read(buffer)
-                        if (count < 0) break
-                        if (count > 0) output.write(buffer, 0, count)
-                    }
+        var archiveVerified = false
+        try {
+            val zipStream = resolver.openOutputStream(zipDoc.uri)
+                ?: error("Не удалось записать архив $zipName")
+            ZipOutputStream(BufferedOutputStream(zipStream)).use { zip ->
+                zip.setLevel(Deflater.NO_COMPRESSION) // JPEG всё равно не сжимается
+                val files = folder.listFiles().filter { it.isFile }.sortedBy { it.name }
+                for (f in files) {
+                    currentCoroutineContext().ensureActive()
+                    zip.putNextEntry(ZipEntry("$folderName/${f.name}"))
+                    resolver.openInputStream(f.uri)?.use { it.copyTo(zip) }
+                    zip.closeEntry()
                 }
             }
 
-            val expected = written.associate { (name, size) -> "$folderName/$name" to size }
-            ArchiveVerifier.verify(verifyFile, expected) { activeContext.ensureActive() }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            "ошибка чтения ZIP/CRC: ${e.message ?: e.javaClass.simpleName}"
+            // 3. Проверка архива через ZipFile: наличие, размер и CRC каждого файла.
+            // Архив SAF-каталога временно копируется в cache, а содержимое читается потоково.
+            onProgress("Проверка архива…", images.size, images.size)
+            val activeContext = currentCoroutineContext()
+            val verifyFile = File.createTempFile("persistor-verify-", ".zip", context.cacheDir)
+            val verificationError = try {
+                val zipIn = resolver.openInputStream(zipDoc.uri)
+                    ?: error("Не удалось открыть архив для проверки")
+                zipIn.use { input ->
+                    verifyFile.outputStream().buffered().use { output ->
+                        val buffer = ByteArray(64 * 1024)
+                        while (true) {
+                            activeContext.ensureActive()
+                            val count = input.read(buffer)
+                            if (count < 0) break
+                            if (count > 0) output.write(buffer, 0, count)
+                        }
+                    }
+                }
+
+                val expected = written.associate { (name, size) -> "$folderName/$name" to size }
+                ArchiveVerifier.verify(verifyFile, expected) { activeContext.ensureActive() }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                "ошибка чтения ZIP/CRC: ${e.message ?: e.javaClass.simpleName}"
+            } finally {
+                verifyFile.delete()
+            }
+            if (verificationError != null) {
+                return ProcessResult.Failure(
+                    "Проверка архива не прошла: $verificationError. Исходные файлы не тронуты, " +
+                        "сжатые файлы остались в папке $folderName."
+                )
+            }
+            archiveVerified = true
         } finally {
-            verifyFile.delete()
-        }
-        if (verificationError != null) {
-            zipDoc.delete()
-            return ProcessResult.Failure(
-                "Проверка архива не прошла: $verificationError. Исходные фото не тронуты, " +
-                    "сжатые файлы остались в папке $folderName."
-            )
+            if (!archiveVerified) zipDoc.delete()
         }
         val zipSize = zipDoc.length()
 
@@ -211,6 +227,36 @@ class Processor(private val context: Context) {
         }
 
         return ProcessResult.Success(zipName, zipDoc.uri, zipSize, written.size, originalBytes, deleted, warnings)
+    }
+
+    private fun copyPdfIntoOutput(item: ImageItem, outputFolder: DocumentFile): Pair<String, Long> {
+        val requestedName = if (item.name.endsWith(".pdf", ignoreCase = true)) item.name else "${item.name}.pdf"
+        val fileName = uniqueName(outputFolder, requestedName)
+        val destination = outputFolder.createFile("application/pdf", fileName)
+            ?: error("Не удалось создать файл $fileName")
+        try {
+            var copied = 0L
+            val input = resolver.openInputStream(item.uri) ?: error("Не удалось открыть ${item.name}")
+            input.use { source ->
+                val output = resolver.openOutputStream(destination.uri) ?: error("Не удалось записать $fileName")
+                output.use { sink ->
+                    val buffer = ByteArray(64 * 1024)
+                    while (true) {
+                        val count = source.read(buffer)
+                        if (count < 0) break
+                        if (count > 0) {
+                            sink.write(buffer, 0, count)
+                            copied += count
+                        }
+                    }
+                }
+            }
+            check(copied > 0L) { "${item.name} пуст" }
+            return (destination.name ?: fileName) to copied
+        } catch (failure: Throwable) {
+            destination.delete()
+            throw failure
+        }
     }
 
     private data class EncodedImage(val bytes: ByteArray, val extension: String, val mimeType: String)

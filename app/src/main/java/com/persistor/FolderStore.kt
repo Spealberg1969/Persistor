@@ -50,6 +50,8 @@ private fun serializeHistory(list: List<HistoryEntry>): String {
 /** Хранит папки (SAF tree URI), настройки, почту, быстрый режим и статистику. */
 class FolderStore(private val context: Context) {
     private val SOURCES = stringSetPreferencesKey("sources")
+    private val CAMERA_JPG_FOLDER = stringPreferencesKey("camera_jpg_folder")
+    private val CAMERA_PDF_FOLDER = stringPreferencesKey("camera_pdf_folder")
     private val OUTPUT = stringPreferencesKey("output")
     private val ARCHIVE = stringPreferencesKey("archive")
     private val SSIM = doublePreferencesKey("ssim")
@@ -73,6 +75,15 @@ class FolderStore(private val context: Context) {
 
     val sources: Flow<Set<Uri>> = context.dataStore.data
         .map { p -> p[SOURCES].orEmpty().map(Uri::parse).toSet() }
+    // Старым установкам сохраняем прежнюю папку камеры, пока пользователь не выберет новые назначения.
+    val cameraJpgFolder: Flow<Uri?> = context.dataStore.data.map { p ->
+        p[CAMERA_JPG_FOLDER]?.let(Uri::parse)
+            ?: p[SOURCES].orEmpty().sorted().firstOrNull()?.let(Uri::parse)
+    }
+    val cameraPdfFolder: Flow<Uri?> = context.dataStore.data.map { p ->
+        p[CAMERA_PDF_FOLDER]?.let(Uri::parse)
+            ?: p[SOURCES].orEmpty().sorted().firstOrNull()?.let(Uri::parse)
+    }
     val output: Flow<Uri?> = context.dataStore.data.map { p -> p[OUTPUT]?.let(Uri::parse) }
     val archive: Flow<Uri?> = context.dataStore.data.map { p -> p[ARCHIVE]?.let(Uri::parse) }
 
@@ -115,6 +126,9 @@ class FolderStore(private val context: Context) {
     suspend fun addSource(uri: Uri) = context.dataStore.edit {
         it[SOURCES] = it[SOURCES].orEmpty() + uri.toString()
     }
+
+    suspend fun setCameraJpgFolder(uri: Uri) = context.dataStore.edit { it[CAMERA_JPG_FOLDER] = uri.toString() }
+    suspend fun setCameraPdfFolder(uri: Uri) = context.dataStore.edit { it[CAMERA_PDF_FOLDER] = uri.toString() }
 
     suspend fun removeSource(uri: Uri) = context.dataStore.edit {
         it[SOURCES] = it[SOURCES].orEmpty() - uri.toString()

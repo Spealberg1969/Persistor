@@ -12,6 +12,8 @@ import kotlinx.coroutines.launch
 
 data class UiState(
     val sources: Set<Uri> = emptySet(),
+    val cameraJpgFolder: Uri? = null,
+    val cameraPdfFolder: Uri? = null,
     val output: Uri? = null,
     val archive: Uri? = null,
     val images: List<ImageItem> = emptyList(),
@@ -33,6 +35,14 @@ private data class Prefs(
     val theme: ThemeMode,
 )
 
+private data class FolderPrefs(
+    val sources: Set<Uri>,
+    val cameraJpgFolder: Uri?,
+    val cameraPdfFolder: Uri?,
+    val output: Uri?,
+    val archive: Uri?,
+)
+
 class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val store = FolderStore(app)
     val repo = ImageRepository(app)
@@ -41,7 +51,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val selected = MutableStateFlow<Set<Uri>>(emptySet())
     private var autoSentFor: ProcessResult? = null
 
-    private val folders = combine(store.sources, store.output, store.archive) { s, o, a -> Triple(s, o, a) }
+    private val folders = combine(
+        store.sources, store.cameraJpgFolder, store.cameraPdfFolder, store.output, store.archive,
+    ) { sources, jpg, pdf, output, archive -> FolderPrefs(sources, jpg, pdf, output, archive) }
+    private val inputFolders = combine(store.sources, store.cameraJpgFolder, store.cameraPdfFolder) { sources, jpg, pdf ->
+        sources + listOfNotNull(jpg, pdf)
+    }
     private val items = combine(images, selected) { i, s -> i to s }
     private val prefs = combine(store.settings, store.mail, store.quickMode, store.history, store.theme) { a, b, c, d, e ->
         Prefs(a, b, c, d, e)
@@ -51,15 +66,32 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         folders, items, prefs, ProcessingState.progress, ProcessingState.result
     ) { f, im, p, pr, r ->
         UiState(
-            f.first, f.second, f.third, im.first, im.second,
-            p.settings, p.mail, p.quick, pr, r, p.history, p.theme
+            sources = f.sources,
+            cameraJpgFolder = f.cameraJpgFolder,
+            cameraPdfFolder = f.cameraPdfFolder,
+            output = f.output,
+            archive = f.archive,
+            images = im.first,
+            selected = im.second,
+            settings = p.settings,
+            mail = p.mail,
+            quickMode = p.quick,
+            progress = pr,
+            result = r,
+            history = p.history,
+            theme = p.theme,
         )
     }.stateIn(viewModelScope, SharingStarted.Eagerly, UiState())
 
     init {
-        viewModelScope.launch { store.sources.collect { reload(it) } }
+        viewModelScope.launch { inputFolders.collect { reload(it) } }
         // После окончания обработки обновляем список (исходники могли быть удалены)
-        viewModelScope.launch { ProcessingState.result.filterNotNull().collect { reload(state.value.sources) } }
+        viewModelScope.launch {
+            ProcessingState.result.filterNotNull().collect {
+                val current = state.value
+                reload(current.sources + listOfNotNull(current.cameraJpgFolder, current.cameraPdfFolder))
+            }
+        }
     }
 
     private suspend fun reload(src: Set<Uri>) {
@@ -77,6 +109,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun addSource(uri: Uri) { persist(uri); viewModelScope.launch { store.addSource(uri) } }
     fun removeSource(uri: Uri) = viewModelScope.launch { store.removeSource(uri) }
+    fun setCameraJpgFolder(uri: Uri) { persist(uri); viewModelScope.launch { store.setCameraJpgFolder(uri) } }
+    fun setCameraPdfFolder(uri: Uri) { persist(uri); viewModelScope.launch { store.setCameraPdfFolder(uri) } }
     fun setOutput(uri: Uri) { persist(uri); viewModelScope.launch { store.setOutput(uri) } }
     fun setArchive(uri: Uri) { persist(uri); viewModelScope.launch { store.setArchive(uri) } }
 
@@ -101,7 +135,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun selectAll() { selected.value = images.value.map { it.uri }.toSet() }
     fun clearSelection() { selected.value = emptySet() }
     fun dismissResult() { ProcessingState.result.value = null }
-    fun refreshImages() { viewModelScope.launch { reload(state.value.sources) } }
+    fun refreshImages() {
+        viewModelScope.launch {
+            val current = state.value
+            reload(current.sources + listOfNotNull(current.cameraJpgFolder, current.cameraPdfFolder))
+        }
+    }
 
     /** true один раз для каждого результата: чтобы Gmail не открывался повторно при повороте экрана. */
     fun consumeAutoSend(r: ProcessResult): Boolean {
