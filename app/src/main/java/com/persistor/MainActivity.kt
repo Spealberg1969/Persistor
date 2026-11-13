@@ -33,6 +33,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import kotlinx.coroutines.delay
@@ -381,9 +382,9 @@ fun MainScreen(vm: MainViewModel) {
                 }
                 FloatingActionButton(
                     onClick = { ctx.startActivity(Intent(ctx, CameraActivity::class.java)) },
-                    modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp).framedCircle(),
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp).size(84.dp).framedCircle(),
                     shape = androidx.compose.foundation.shape.CircleShape,
-                ) { Text("📷") }
+                ) { Text("📷", fontSize = 24.sp) }
             }
 
             if (running) {
