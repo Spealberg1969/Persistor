@@ -13,6 +13,9 @@ internal fun requestedOrientationForRotation(rotation: Int): Int = when (rotatio
     else -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
 }
 
+internal fun autoLockRequestedOrientation(rotation: Int, alreadyLocked: Boolean): Int? =
+    if (alreadyLocked) null else requestedOrientationForRotation(rotation)
+
 /** Camera2 JPEG_ORIENTATION for the rear-facing cameras exposed by Persistor. */
 internal fun jpegOrientationDegrees(sensorOrientation: Int, deviceOrientation: Int): Int =
     (sensorOrientation + deviceOrientation).mod(360)

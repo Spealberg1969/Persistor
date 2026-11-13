@@ -3,6 +3,7 @@ package com.persistor
 import android.content.pm.ActivityInfo
 import android.view.Surface
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class CameraOrientationTest {
@@ -18,6 +19,31 @@ class CameraOrientationTest {
         assertEquals(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE, requestedOrientationForRotation(Surface.ROTATION_90))
         assertEquals(ActivityInfo.SCREEN_ORIENTATION_REVERSE_PORTRAIT, requestedOrientationForRotation(Surface.ROTATION_180))
         assertEquals(ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE, requestedOrientationForRotation(Surface.ROTATION_270))
+    }
+
+    @Test
+    fun automaticLockSupportsInitialPortraitAndAllLandscapeRotations() {
+        assertEquals(
+            ActivityInfo.SCREEN_ORIENTATION_PORTRAIT,
+            autoLockRequestedOrientation(Surface.ROTATION_0, alreadyLocked = false),
+        )
+        assertEquals(
+            ActivityInfo.SCREEN_ORIENTATION_REVERSE_PORTRAIT,
+            autoLockRequestedOrientation(Surface.ROTATION_180, alreadyLocked = false),
+        )
+        assertEquals(
+            ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE,
+            autoLockRequestedOrientation(Surface.ROTATION_90, alreadyLocked = false),
+        )
+        assertEquals(
+            ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE,
+            autoLockRequestedOrientation(Surface.ROTATION_270, alreadyLocked = false),
+        )
+    }
+
+    @Test
+    fun alreadyLockedInterfaceIsNotAutomaticallyLockedAgain() {
+        assertNull(autoLockRequestedOrientation(Surface.ROTATION_0, alreadyLocked = true))
     }
 
     @Test

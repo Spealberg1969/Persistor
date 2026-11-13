@@ -181,10 +181,15 @@ fun CameraScreen(angleState: MutableIntState) {
         activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
     }
 
-    LaunchedEffect(landscape, angleState.intValue) {
-        if (landscape && !orientationLocked) {
+    LaunchedEffect(landscape, rotation, angleState.intValue) {
+        if (!orientationLocked) {
             delay(2_000)
-            if (landscape && !orientationLocked) lockCameraOrientation()
+            // Lock whichever interface orientation has stabilized, including the initial portrait screen.
+            autoLockRequestedOrientation(rotation, orientationLocked)?.let { requested ->
+                lockedCaptureAngle = angleState.intValue
+                orientationLocked = true
+                activity.requestedOrientation = requested
+            }
         }
     }
 
