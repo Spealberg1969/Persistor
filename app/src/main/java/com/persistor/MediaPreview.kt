@@ -7,6 +7,7 @@ import android.graphics.Rect
 import android.graphics.pdf.PdfRenderer
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -22,6 +23,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.PointerEventPass
@@ -30,6 +33,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalViewConfiguration
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -210,15 +215,11 @@ fun FullScreenMediaViewer(
                 }
             }
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                PButton(onClick = { onIndex(index - 1) }, enabled = index > 0) {
-                    Text("◀ Файл", color = androidx.compose.ui.graphics.Color.White)
-                }
+                PreviewFileArrow(isPrevious = true, enabled = index > 0) { onIndex(index - 1) }
                 Spacer(Modifier.weight(1f))
                 Text("Свайп: листать файлы · двойное касание: увеличить", color = androidx.compose.ui.graphics.Color.LightGray, style = MaterialTheme.typography.bodySmall)
                 Spacer(Modifier.weight(1f))
-                PButton(onClick = { onIndex(index + 1) }, enabled = index < items.lastIndex) {
-                    Text("Файл ▶", color = androidx.compose.ui.graphics.Color.White)
-                }
+                PreviewFileArrow(isPrevious = false, enabled = index < items.lastIndex) { onIndex(index + 1) }
             }
         }
     }
@@ -231,6 +232,52 @@ fun FullScreenMediaViewer(
             confirmButton = { PButton(onClick = { confirmDelete = false; onDelete(item) }) { Text("Удалить") } },
             dismissButton = { PButton(onClick = { confirmDelete = false }) { Text("Отмена") } },
         )
+    }
+}
+
+@Composable
+private fun PreviewFileArrow(
+    isPrevious: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    PButton(
+        onClick = onClick,
+        modifier = Modifier.size(48.dp).semantics {
+            contentDescription = if (isPrevious) "Предыдущий файл" else "Следующий файл"
+        },
+        enabled = enabled,
+        contentPadding = PaddingValues(0.dp),
+    ) {
+        Canvas(Modifier.size(24.dp)) {
+            val tint = androidx.compose.ui.graphics.Color.White.copy(alpha = if (enabled) 1f else 0.35f)
+            val middleY = size.height / 2f
+            val tipX = size.width * if (isPrevious) 0.2f else 0.8f
+            val shaftStartX = size.width * if (isPrevious) 0.88f else 0.12f
+            val headBaseX = size.width * 0.52f
+            val strokeWidth = 2.dp.toPx()
+            drawLine(
+                color = tint,
+                start = Offset(shaftStartX, middleY),
+                end = Offset(tipX, middleY),
+                strokeWidth = strokeWidth,
+                cap = StrokeCap.Round,
+            )
+            drawLine(
+                color = tint,
+                start = Offset(tipX, middleY),
+                end = Offset(headBaseX, size.height * 0.22f),
+                strokeWidth = strokeWidth,
+                cap = StrokeCap.Round,
+            )
+            drawLine(
+                color = tint,
+                start = Offset(tipX, middleY),
+                end = Offset(headBaseX, size.height * 0.78f),
+                strokeWidth = strokeWidth,
+                cap = StrokeCap.Round,
+            )
+        }
     }
 }
 
