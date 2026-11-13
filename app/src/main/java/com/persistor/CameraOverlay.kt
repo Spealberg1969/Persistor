@@ -4,7 +4,6 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Paint
-import android.graphics.RectF
 import androidx.exifinterface.media.ExifInterface
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
@@ -56,6 +55,9 @@ object CameraOverlayRenderer {
         settings.name.trim().takeIf { settings.showName && it.isNotEmpty() }?.let(::add)
     }
 
+    /** Тонкий контур масштабируется с текстом, но не становится чрезмерно толстым на больших фото. */
+    internal fun outlineStrokeWidth(textSize: Float): Float = (textSize * 0.045f).coerceIn(1.25f, 2.5f)
+
     /** Впечатывает штамп в пиксели и нормализует EXIF orientation, чтобы надпись не повернулась вместе с EXIF. */
     fun applyToJpeg(bytes: ByteArray, settings: CameraOverlaySettings, timestampMillis: Long): ByteArray {
         if (!settings.enabled) return bytes
@@ -96,9 +98,8 @@ object CameraOverlayRenderer {
         val shortSide = minOf(bitmap.width, bitmap.height).toFloat()
         val textSize = (shortSide * settings.fontSizeSp.coerceIn(12, 36) / 360f).coerceAtLeast(12f)
         val margin = (shortSide * 0.025f).coerceAtLeast(8f)
-        val padding = (textSize * 0.42f).coerceAtLeast(6f)
         val gap = textSize * 0.16f
-        val maxTextWidth = (bitmap.width - 2f * margin - 2f * padding).coerceAtLeast(textSize)
+        val maxTextWidth = (bitmap.width - 2f * margin).coerceAtLeast(textSize)
 
         val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = android.graphics.Color.WHITE
@@ -115,38 +116,28 @@ object CameraOverlayRenderer {
 
         val metrics = textPaint.fontMetrics
         val lineHeight = metrics.descent - metrics.ascent
-        val contentWidth = wrapped.maxOf { textPaint.measureText(it) }
-        val boxWidth = (contentWidth + 2f * padding).coerceAtMost(bitmap.width - 2f * margin)
-        val boxHeight = 2f * padding + wrapped.size * lineHeight + (wrapped.size - 1).coerceAtLeast(0) * gap
-        val left = when (settings.position.x) {
+        val contentHeight = wrapped.size * lineHeight + (wrapped.size - 1).coerceAtLeast(0) * gap
+        val anchorX = when (settings.position.x) {
             0f -> margin
-            1f -> bitmap.width - margin - boxWidth
-            else -> (bitmap.width - boxWidth) / 2f
-        }.coerceIn(0f, (bitmap.width - boxWidth).coerceAtLeast(0f))
+            1f -> bitmap.width - margin
+            else -> bitmap.width / 2f
+        }
         val top = when (settings.position.y) {
             0f -> margin
-            1f -> bitmap.height - margin - boxHeight
-            else -> (bitmap.height - boxHeight) / 2f
-        }.coerceIn(0f, (bitmap.height - boxHeight).coerceAtLeast(0f))
-        val box = RectF(left, top, left + boxWidth, top + boxHeight)
+            1f -> bitmap.height - margin - contentHeight
+            else -> (bitmap.height - contentHeight) / 2f
+        }.coerceIn(0f, (bitmap.height - contentHeight).coerceAtLeast(0f))
         val canvas = Canvas(bitmap)
-        canvas.drawRoundRect(
-            box,
-            textSize * 0.24f,
-            textSize * 0.24f,
-            Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = android.graphics.Color.BLACK
-                alpha = 155
-            },
-        )
-
-        val anchorX = when (settings.position.x) {
-            0f -> box.left + padding
-            1f -> box.right - padding
-            else -> box.centerX()
+        val outlinePaint = Paint(textPaint).apply {
+            color = android.graphics.Color.BLACK
+            alpha = 230
+            style = Paint.Style.STROKE
+            strokeWidth = outlineStrokeWidth(textSize)
+            strokeJoin = Paint.Join.ROUND
         }
-        var baseline = box.top + padding - metrics.ascent
+        var baseline = top - metrics.ascent
         wrapped.forEach { line ->
+            canvas.drawText(line, anchorX, baseline, outlinePaint)
             canvas.drawText(line, anchorX, baseline, textPaint)
             baseline += lineHeight + gap
         }

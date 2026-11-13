@@ -53,6 +53,13 @@ class CameraOverlayTest {
     }
 
     @Test
+    fun outlineStrokeScalesWithFontAndStaysThin() {
+        assertEquals(1.25f, CameraOverlayRenderer.outlineStrokeWidth(12f), 0.001f)
+        assertEquals(1.35f, CameraOverlayRenderer.outlineStrokeWidth(30f), 0.001f)
+        assertEquals(2.5f, CameraOverlayRenderer.outlineStrokeWidth(100f), 0.001f)
+    }
+
+    @Test
     fun disabledOverlayLeavesJpegBytesUntouched() {
         val jpeg = byteArrayOf(0xff.toByte(), 0xd8.toByte(), 0xff.toByte(), 0xd9.toByte())
 

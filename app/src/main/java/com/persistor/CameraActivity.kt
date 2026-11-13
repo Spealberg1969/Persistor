@@ -721,20 +721,36 @@ fun CameraScreen(angleState: MutableIntState) {
                                     .size(cropWidth, cropHeight),
                                 contentAlignment = overlaySettings.position.previewAlignment(),
                             ) {
+                                val stampFontSize = overlaySettings.fontSizeSp.sp
+                                val stampLineHeight = (overlaySettings.fontSizeSp * 1.2f).sp
+                                val outlineWidth = with(LocalDensity.current) {
+                                    CameraOverlayRenderer.outlineStrokeWidth(stampFontSize.toPx())
+                                }
                                 Column(
                                     Modifier.padding(8.dp).widthIn(max = (cropWidth - 16.dp).coerceAtLeast(24.dp))
-                                        .background(Color.Black.copy(alpha = 0.58f), RoundedCornerShape(6.dp))
-                                        .padding(horizontal = 8.dp, vertical = 5.dp),
                                 ) {
                                     stampLines.forEach { line ->
-                                        Text(
-                                            line,
-                                            color = Color.White,
-                                            fontSize = overlaySettings.fontSizeSp.sp,
-                                            lineHeight = (overlaySettings.fontSizeSp * 1.2f).sp,
-                                            fontFamily = FontFamily.SansSerif,
-                                            fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
-                                        )
+                                        Box {
+                                            Text(
+                                                line,
+                                                color = Color.Black,
+                                                fontSize = stampFontSize,
+                                                lineHeight = stampLineHeight,
+                                                fontFamily = FontFamily.SansSerif,
+                                                fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+                                                style = androidx.compose.ui.text.TextStyle(
+                                                    drawStyle = Stroke(width = outlineWidth),
+                                                ),
+                                            )
+                                            Text(
+                                                line,
+                                                color = Color.White,
+                                                fontSize = stampFontSize,
+                                                lineHeight = stampLineHeight,
+                                                fontFamily = FontFamily.SansSerif,
+                                                fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+                                            )
+                                        }
                                     }
                                 }
                             }
