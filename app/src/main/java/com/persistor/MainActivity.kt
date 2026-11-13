@@ -216,15 +216,25 @@ fun MainScreen(vm: MainViewModel) {
                         CompressionMethod.JPEG_XL -> "Выход .jxl; приложение проверяет его собственной библиотекой, но галереи и старые просмотрщики могут не открыть файл."
                         else -> "Для цветных форматов качество подбирается по SSIM; результат зависит от выбранного кодека."
                     }
+                    val pdfCodecHint = when (s.settings.compressionMethod) {
+                        CompressionMethod.JPEGLI -> "JPEGli"
+                        CompressionMethod.MOZJPEG -> "MozJPEG"
+                        else -> "Android JPEG"
+                    }
+                    val pdfHint = if (!s.images.any { it.isPdf }) "" else if (s.settings.compressPdf) {
+                        " PDF-страницы будут сжиматься в $pdfCodecHint; WebP/JXL/HEIF/AVIF автоматически заменяются на стандартный JPEG."
+                    } else {
+                        " Сжатие PDF выключено: оригинальные PDF попадут в архив без изменений."
+                    }
                     Text(
-                        formatHint + if (s.images.any { it.isPdf }) " Готовые PDF копируются без повторного сжатия страниц." else "",
+                        formatHint + pdfHint,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
 
                     Spacer(Modifier.height(8.dp))
                     var sl by remember(s.settings.ssimTarget) { mutableFloatStateOf(s.settings.ssimTarget.toFloat()) }
-                    PText("Целевое качество SSIM: ${"%.2f".format(sl)}", style = MaterialTheme.typography.titleSmall)
+                    PText("Целевое качество SSIM для фото и PDF: ${"%.2f".format(sl)}", style = MaterialTheme.typography.titleSmall)
                     Slider(
                         value = sl,
                         onValueChange = { sl = it },
@@ -232,6 +242,38 @@ fun MainScreen(vm: MainViewModel) {
                         valueRange = 0.90f..0.99f,
                         steps = 8,
                     )
+                    PText("Пресеты SSIM", style = MaterialTheme.typography.bodySmall)
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        listOf(0.92, 0.95, 0.98).forEach { preset ->
+                            FilterChip(
+                                selected = (sl * 100).roundToInt() == (preset * 100).roundToInt(),
+                                onClick = {
+                                    sl = preset.toFloat()
+                                    vm.setSsim(preset)
+                                },
+                                label = { Text("%.2f".format(preset)) },
+                            )
+                        }
+                    }
+                    SwitchRow(
+                        "Сжимать PDF постранично по SSIM (с потерей структуры)",
+                        s.settings.compressPdf,
+                        vm::setCompressPdf,
+                    )
+                    Text(
+                        "Страницы рендерятся максимум в 200 dpi / 4 Мп; целевой SSIM — упрощённая оценка по яркости и может отличаться от внешних калькуляторов. Выключите сжатие, если важно сохранить выделяемый текст, вектор, ссылки, формы или метаданные PDF.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (s.images.any { it.isPdf }) {
+                        if (s.settings.compressPdf) {
+                            Text(
+                                "PDF-сжатие сравнивает каждую страницу с исходным рендером по SSIM. Если результат не меньше оригинала, сохраняется исходный PDF. Сжатый документ пересобирается из JPEG-страниц.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
                     SwitchRow("Удалять папку со сжатыми файлами после архивации", s.settings.deleteTempFolder, vm::setDeleteTemp)
                     SwitchRow("Удалять исходные фото и PDF после успешной архивации", s.settings.deleteOriginals, vm::setDeleteOriginals)
                     SwitchRow("Быстрый режим: при запуске обработать все файлы (отсчёт 5 с)", s.quickMode, vm::setQuickMode)
@@ -293,6 +335,25 @@ fun MainScreen(vm: MainViewModel) {
 
             Spacer(Modifier.height(8.dp))
             PText("Файлов (изображения и PDF): ${s.images.size}, выбрано: ${s.selected.size}")
+            val jpegCount = s.images.count { it.isJpeg }
+            val pdfCount = s.images.count { it.isPdf }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                POutlinedButton(
+                    onClick = { vm.selectCategory(pdf = false) },
+                    enabled = !running && jpegCount > 0,
+                    modifier = Modifier.weight(1f),
+                ) { Text("Только JPEG ($jpegCount)", maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                POutlinedButton(
+                    onClick = { vm.selectCategory(pdf = true) },
+                    enabled = !running && pdfCount > 0,
+                    modifier = Modifier.weight(1f),
+                ) { Text("Только PDF ($pdfCount)", maxLines = 1, overflow = TextOverflow.Ellipsis) }
+            }
+            Text(
+                "Кнопка JPEG выделяет файлы .jpg/.jpeg; другие изображения можно отметить отдельно или выбрать вместе со всеми файлами.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             Spacer(Modifier.height(4.dp))
 
             // Сетка миниатюр, поверх неё в правом нижнем углу круглая кнопка камеры

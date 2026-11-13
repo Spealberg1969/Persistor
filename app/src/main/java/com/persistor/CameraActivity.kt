@@ -3,6 +3,7 @@ package com.persistor
 import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.graphics.Matrix
 import android.graphics.RectF
@@ -52,6 +53,8 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
@@ -164,6 +167,26 @@ fun CameraScreen(angleState: MutableIntState) {
     val config = LocalConfiguration.current
     val landscape = config.screenWidthDp > config.screenHeightDp
     val rotation = displayRotation(activity)
+    var orientationLocked by remember { mutableStateOf(false) }
+    var lockedCaptureAngle by remember { mutableIntStateOf(angleState.intValue) }
+
+    fun lockCameraOrientation() {
+        lockedCaptureAngle = angleState.intValue
+        orientationLocked = true
+        activity.requestedOrientation = requestedOrientationForRotation(rotation)
+    }
+
+    fun unlockCameraOrientation() {
+        orientationLocked = false
+        activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
+    }
+
+    LaunchedEffect(landscape, angleState.intValue) {
+        if (landscape && !orientationLocked) {
+            delay(2_000)
+            if (landscape && !orientationLocked) lockCameraOrientation()
+        }
+    }
 
     val store = remember { FolderStore(appCtx) }
     val repo = remember { ImageRepository(appCtx) }
@@ -303,6 +326,8 @@ fun CameraScreen(angleState: MutableIntState) {
     }
     DisposableEffect(Unit) {
         onDispose {
+            orientationLocked = false
+            activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
             controller.release()
             pdfSessionDir.deleteRecursively()
         }
@@ -559,8 +584,34 @@ fun CameraScreen(angleState: MutableIntState) {
             Modifier.size(104.dp).clip(CircleShape)
                 .background(if (ready) Color.White else Color.Gray)
                 .framedCircle()
-                .clickable(enabled = ready) { controller.takePicture(angleState.intValue) }
+                .clickable(enabled = ready) {
+                    controller.takePicture(
+                        deviceAngle = angleState.intValue,
+                        lockedAngle = lockedCaptureAngle.takeIf { orientationLocked },
+                        onLockConsumed = {
+                            activity.runOnUiThread {
+                                if (orientationLocked) unlockCameraOrientation()
+                            }
+                        },
+                    )
+                }
         )
+    }
+    val orientationLockBtn: @Composable () -> Unit = {
+        Surface(
+            onClick = { if (orientationLocked) unlockCameraOrientation() else lockCameraOrientation() },
+            enabled = !controller.busy && !isFinalizingPdf,
+            modifier = Modifier.size(48.dp).semantics {
+                contentDescription = if (orientationLocked) "Фиксация ориентации включена" else "Фиксация ориентации выключена"
+            },
+            shape = CircleShape,
+            color = if (orientationLocked) Color(0xFF2E7D32) else Color(0xFFEF6C00),
+            contentColor = Color.White,
+        ) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text(if (orientationLocked) "ON" else "OFF", style = MaterialTheme.typography.labelSmall)
+            }
+        }
     }
     val thumb: @Composable () -> Unit = {
         val last = shots.firstOrNull()
@@ -585,7 +636,8 @@ fun CameraScreen(angleState: MutableIntState) {
             !hasPermission -> Text("Нужно разрешение на камеру", color = Color.White)
             plan == null -> Text(planError ?: "Камеры не найдены", color = Color.White)
             else -> {
-                val outputDimensions = plan.outputDimensionsForDeviceAngle(angleState.intValue)
+                val previewDeviceAngle = lockedCaptureAngle.takeIf { orientationLocked } ?: angleState.intValue
+                val outputDimensions = plan.outputDimensionsForDeviceAngle(previewDeviceAngle)
                 val previewCropAspect = if (plan.resolution is Resolution.Custom) {
                     outputDimensions.first.toFloat() / outputDimensions.second
                 } else {
@@ -722,7 +774,9 @@ fun CameraScreen(angleState: MutableIntState) {
                     Spacer(Modifier.height(8.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         thumb()
-                        Spacer(Modifier.width(14.dp))
+                        Spacer(Modifier.width(2.dp))
+                        orientationLockBtn()
+                        Spacer(Modifier.width(2.dp))
                         shutter()
                     }
                 }
@@ -763,6 +817,8 @@ fun CameraScreen(angleState: MutableIntState) {
                         Box(Modifier.weight(1f)) { cleanSw() }
                         thumb()
                         Spacer(Modifier.width(14.dp))
+                        orientationLockBtn()
+                        Spacer(Modifier.width(8.dp))
                         shutter()
                     }
                 }

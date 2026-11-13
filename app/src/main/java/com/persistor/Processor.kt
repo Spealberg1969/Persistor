@@ -45,6 +45,7 @@ enum class CompressionMethod(
 data class ProcessSettings(
     val ssimTarget: Double = 0.95,
     val minQuality: Int = 40,              // нижняя граница Q: защита от нечитаемого текста
+    val compressPdf: Boolean = true,
     val deleteTempFolder: Boolean = true,  // удалить папку со сжатыми файлами после архивации
     val deleteOriginals: Boolean = false,  // удалить исходные фото после успешной архивации
     val compressionMethod: CompressionMethod = CompressionMethod.ANDROID,
@@ -52,8 +53,18 @@ data class ProcessSettings(
 
 data class ProcessProgress(val running: Boolean = false, val message: String = "", val current: Int = 0, val total: Int = 0)
 
-internal fun archiveZipName(folderName: String, includesPdf: Boolean): String =
-    "$folderName${if (includesPdf) "_pdf" else ""}.zip"
+internal fun processedFolderName(date: String, includesJpeg: Boolean, includesPdf: Boolean, sequence: Int = 1): String {
+    require(includesJpeg || includesPdf) { "At least one file category must be present" }
+    require(sequence >= 1) { "Sequence must be positive" }
+    val categories = when {
+        includesJpeg && includesPdf -> "_jpeg_pdf"
+        includesJpeg -> "_jpeg"
+        else -> "_pdf"
+    }
+    return "$date$categories${if (sequence == 1) "" else "_$sequence"}"
+}
+
+internal fun archiveZipName(folderName: String): String = "$folderName.zip"
 
 sealed interface ProcessResult {
     data class Success(
@@ -107,12 +118,13 @@ class Processor(private val context: Context) {
             return ProcessResult.Failure("Нет доступа на запись в выбранные папки. Выберите их заново.")
         }
 
-        // Имя папки/архива: текущая дата; при повторном запуске в тот же день — _2, _3...
-        val date = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+        // Имя папки отражает обработанные типы файлов; повторные запуски получают _2, _3...
+        val date = SimpleDateFormat("dd.MM.yyyy", Locale.US).format(Date())
+        val includesJpeg = images.any { !it.isPdf }
         val includesPdf = images.any { it.isPdf }
         var n = 1
-        fun nameFor(i: Int) = if (i == 1) date else "${date}_$i"
-        while (outRoot.findFile(nameFor(n)) != null || arcRoot.findFile(archiveZipName(nameFor(n), includesPdf)) != null) n++
+        fun nameFor(i: Int) = processedFolderName(date, includesJpeg, includesPdf, i)
+        while (outRoot.findFile(nameFor(n)) != null || arcRoot.findFile(archiveZipName(nameFor(n))) != null) n++
         val folderName = nameFor(n)
 
         val folder = outRoot.createDirectory(folderName)
@@ -124,11 +136,15 @@ class Processor(private val context: Context) {
         var originalBytes = 0L
         for ((index, img) in images.withIndex()) {
             currentCoroutineContext().ensureActive()
-            onProgress("${if (img.isPdf) "Добавление PDF" else "Сжатие"} ${index + 1}/${images.size}: ${img.name}", index, images.size)
+            onProgress("${if (img.isPdf) "Сжатие PDF" else "Сжатие"} ${index + 1}/${images.size}: ${img.name}", index, images.size)
 
             if (img.isPdf) {
-                val (pdfName, copiedBytes) = copyPdfIntoOutput(img, folder)
-                written += pdfName to copiedBytes
+                val (pdfName, pdfBytes) = if (st.compressPdf) {
+                    compressPdfIntoOutput(img, folder, st, warnings) { page, total ->
+                        onProgress("${img.name}: страница $page/$total", index, images.size)
+                    }
+                } else copyPdfIntoOutput(img, folder)
+                written += pdfName to pdfBytes
                 originalBytes += img.size
                 continue
             }
@@ -157,7 +173,7 @@ class Processor(private val context: Context) {
 
         // 2. ZIP
         onProgress("Создание архива…", images.size, images.size)
-        val zipName = archiveZipName(folderName, includesPdf)
+        val zipName = archiveZipName(folderName)
         val zipDoc = arcRoot.createFile("application/zip", zipName)
             ?: return ProcessResult.Failure("Не удалось создать архив $zipName")
         var archiveVerified = false
@@ -253,6 +269,52 @@ class Processor(private val context: Context) {
             }
             check(copied > 0L) { "${item.name} пуст" }
             return (destination.name ?: fileName) to copied
+        } catch (failure: Throwable) {
+            destination.delete()
+            throw failure
+        }
+    }
+
+    private suspend fun compressPdfIntoOutput(
+        item: ImageItem,
+        outputFolder: DocumentFile,
+        settings: ProcessSettings,
+        warnings: MutableList<String>,
+        onPageProgress: (Int, Int) -> Unit,
+    ): Pair<String, Long> {
+        val tempPdf = File.createTempFile("persistor-pdf-optimized-", ".pdf", context.cacheDir)
+        try {
+            val codec = pdfJpegCodecFor(settings.compressionMethod)
+            val report = PdfOptimizer.compress(context, item.uri, tempPdf, settings.ssimTarget, codec, onPageProgress)
+            if (item.size > 0L && tempPdf.length() >= item.size) {
+                warnings += "${item.name}: сжатие не уменьшило размер, исходный PDF сохранён без изменений"
+                return copyPdfIntoOutput(item, outputFolder)
+            }
+
+            if (!settings.compressionMethod.supportsDirectPdfJpeg()) {
+                warnings += "${item.name}: для страниц PDF применён Android JPEG; выбранный формат подходит только для отдельных изображений"
+            }
+            if (report.pagesBelowTarget > 0) {
+                warnings += "${item.name}: цель SSIM ${"%.2f".format(settings.ssimTarget)} не достигнута для ${report.pagesBelowTarget} стр.; использовано JPEG quality 95"
+            }
+            warnings += "${item.name}: страницы пересобраны как JPEG (рендер максимум 200 dpi / 4 Мп); текстовый слой, вектор, ссылки, формы и метаданные исходного PDF не сохраняются"
+            return copyFileIntoPdfOutput(item, tempPdf, outputFolder)
+        } finally {
+            tempPdf.delete()
+        }
+    }
+
+    private fun copyFileIntoPdfOutput(item: ImageItem, source: File, outputFolder: DocumentFile): Pair<String, Long> {
+        val requestedName = if (item.name.endsWith(".pdf", ignoreCase = true)) item.name else "${item.name}.pdf"
+        val fileName = uniqueName(outputFolder, requestedName)
+        val destination = outputFolder.createFile("application/pdf", fileName)
+            ?: error("Не удалось создать файл $fileName")
+        try {
+            val output = resolver.openOutputStream(destination.uri) ?: error("Не удалось записать $fileName")
+            source.inputStream().buffered().use { input ->
+                output.buffered().use { sink -> input.copyTo(sink, 64 * 1024) }
+            }
+            return (destination.name ?: fileName) to source.length()
         } catch (failure: Throwable) {
             destination.delete()
             throw failure

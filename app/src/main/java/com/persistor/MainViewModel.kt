@@ -115,6 +115,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun setArchive(uri: Uri) { persist(uri); viewModelScope.launch { store.setArchive(uri) } }
 
     fun setSsim(v: Double) = viewModelScope.launch { store.setSsim(v) }
+    fun setCompressPdf(v: Boolean) = viewModelScope.launch { store.setCompressPdf(v) }
     fun setDeleteTemp(v: Boolean) = viewModelScope.launch { store.setDeleteTemp(v) }
     fun setDeleteOriginals(v: Boolean) = viewModelScope.launch { store.setDeleteOriginals(v) }
     fun setCompressionMethod(v: CompressionMethod) = viewModelScope.launch { store.setCompressionMethod(v) }
@@ -133,6 +134,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun selectAll() { selected.value = images.value.map { it.uri }.toSet() }
+    fun selectCategory(pdf: Boolean) {
+        val current = images.value
+        val indices = categorySelectionIndices(current.map { it.isJpeg }, current.map { it.isPdf }, pdf)
+        selected.value = indices.mapTo(linkedSetOf()) { current[it].uri }
+    }
     fun clearSelection() { selected.value = emptySet() }
     fun dismissResult() { ProcessingState.result.value = null }
     fun refreshImages() {

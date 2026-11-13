@@ -50,16 +50,7 @@ internal object PdfPageCompressor {
         try {
             oriented = decoded.applyExifOrientation(orientation)
             val bitmap = requireNotNull(oriented)
-            val encoded = when (codec) {
-                PdfJpegCodec.ANDROID_JPEG -> ByteArrayOutputStream().use { stream ->
-                    check(bitmap.compress(Bitmap.CompressFormat.JPEG, quality, stream)) {
-                        "Android JPEG не смог сжать страницу PDF"
-                    }
-                    stream.toByteArray()
-                }
-                PdfJpegCodec.JPEGLI -> JpegliEncoder.encode(bitmap, quality)
-                PdfJpegCodec.MOZJPEG -> NativeImageEncoder.encodeMozJpeg(bitmap, quality, progressive = false)
-            }
+            val encoded = encodeBitmap(bitmap, codec, quality)
             require(encoded.size >= 4 && encoded[0] == 0xFF.toByte() && encoded[1] == 0xD8.toByte()) {
                 "Выбранный кодек не вернул корректный JPEG для PDF"
             }
@@ -69,6 +60,20 @@ internal object PdfPageCompressor {
         } finally {
             oriented?.takeIf { it !== decoded && !it.isRecycled }?.recycle()
             if (!decoded.isRecycled) decoded.recycle()
+        }
+    }
+
+    fun encodeBitmap(bitmap: Bitmap, codec: PdfJpegCodec, quality: Int): ByteArray {
+        require(quality in 1..100) { "JPEG quality must be between 1 and 100" }
+        return when (codec) {
+            PdfJpegCodec.ANDROID_JPEG -> ByteArrayOutputStream().use { stream ->
+                check(bitmap.compress(Bitmap.CompressFormat.JPEG, quality, stream)) {
+                    "Android JPEG не смог сжать страницу PDF"
+                }
+                stream.toByteArray()
+            }
+            PdfJpegCodec.JPEGLI -> JpegliEncoder.encode(bitmap, quality)
+            PdfJpegCodec.MOZJPEG -> NativeImageEncoder.encodeMozJpeg(bitmap, quality, progressive = false)
         }
     }
 }

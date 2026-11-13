@@ -10,13 +10,12 @@ import java.io.IOException
 import java.nio.charset.StandardCharsets
 
 class PdfDocumentWriterTest {
-    @get:Rule
-    val temporaryFolder = TemporaryFolder()
+    @get:Rule val temporaryFolder = TemporaryFolder()
 
     @Test
-    fun writesSinglePagePdfWithEmbeddedJpeg() {
+    fun writesSinglePagePdfWithJpegImageXObject() {
         val image = fixture("pdf-page-portrait.jpg")
-        val output = File(temporaryFolder.root, "single.pdf")
+        val output = File(temporaryFolder.root, "one-page.pdf")
 
         PdfDocumentWriter.write(listOf(PdfJpegPage(image, 40, 60)), output)
 
@@ -33,10 +32,10 @@ class PdfDocumentWriterTest {
     fun writesMultipagePdfAndUsesLandscapePageForLandscapeImage() {
         val portrait = fixture("pdf-page-portrait.jpg")
         val landscape = fixture("pdf-page-landscape.jpg")
-        val output = File(temporaryFolder.root, "multi.pdf")
+        val output = File(temporaryFolder.root, "two-page.pdf")
 
         PdfDocumentWriter.write(
-            listOf(PdfJpegPage(portrait, 40, 60), PdfJpegPage(landscape, 80, 40)),
+            listOf(PdfJpegPage(portrait, 40, 60), PdfJpegPage(landscape, 60, 40)),
             output,
         )
 
@@ -49,6 +48,31 @@ class PdfDocumentWriterTest {
         validateWithPdfInfoIfAvailable(output, 2)
     }
 
+    @Test
+    fun retainsOriginalPageSizeAndUsesFullPageForOptimizedPdfPages() {
+        val image = fixture("pdf-page-portrait.jpg")
+        val output = File(temporaryFolder.root, "preserved-page-size.pdf")
+
+        PdfDocumentWriter.write(
+            listOf(
+                PdfJpegPage(
+                    file = image,
+                    width = 40,
+                    height = 60,
+                    pageWidthPoints = 400f,
+                    pageHeightPoints = 600f,
+                    marginPoints = 0f,
+                ),
+            ),
+            output,
+        )
+
+        val pdf = output.readBytes().toString(StandardCharsets.ISO_8859_1)
+        assertTrue(pdf.contains("/MediaBox [0 0 400.000 600.000]"))
+        assertTrue(pdf.contains("400.0000 0 0 600.0000 0.0000 0.0000 cm"))
+        validateWithPdfInfoIfAvailable(output, 1)
+    }
+
     @Test(expected = IllegalArgumentException::class)
     fun rejectsEmptyPageList() {
         PdfDocumentWriter.write(emptyList(), File(temporaryFolder.root, "empty.pdf"))
@@ -56,31 +80,30 @@ class PdfDocumentWriterTest {
 
     @Test(expected = IllegalArgumentException::class)
     fun rejectsNonJpegPageData() {
-        val invalid = File(temporaryFolder.root, "not-a-jpeg.bin")
-        invalid.writeBytes(byteArrayOf(0, 1, 2, 3))
-        PdfDocumentWriter.write(listOf(PdfJpegPage(invalid, 1, 1)), File(temporaryFolder.root, "bad.pdf"))
+        val invalid = File(temporaryFolder.root, "not-a-jpeg.bin").apply { writeBytes(byteArrayOf(1, 2, 3, 4)) }
+        PdfDocumentWriter.write(listOf(PdfJpegPage(invalid, 10, 10)), File(temporaryFolder.root, "invalid.pdf"))
     }
 
     private fun fixture(name: String): File {
-        val output = File(temporaryFolder.root, name)
-        val stream = javaClass.getResourceAsStream("/$name") ?: error("Missing test resource: $name")
-        stream.use { input -> output.outputStream().use { destination -> input.copyTo(destination) } }
-        return output
+        val target = File(temporaryFolder.root, name)
+        javaClass.getResourceAsStream("/$name")!!.use { input ->
+            target.outputStream().use { output -> input.copyTo(output) }
+        }
+        return target
     }
 
-    private fun validateWithPdfInfoIfAvailable(file: File, expectedPages: Int) {
+    private fun validateWithPdfInfoIfAvailable(pdf: File, expectedPages: Int) {
         val process = try {
-            ProcessBuilder("pdfinfo", file.absolutePath).redirectErrorStream(true).start()
+            ProcessBuilder("pdfinfo", pdf.absolutePath).redirectErrorStream(true).start()
         } catch (_: IOException) {
             return
         }
         val output = process.inputStream.bufferedReader().use { it.readText() }
         assertEquals(output, 0, process.waitFor())
         assertTrue(output, Regex("(?m)^Pages:\\s+$expectedPages$").containsMatchIn(output))
-
-        val prefix = File(file.parentFile, "rendered-${file.nameWithoutExtension}")
+        val prefix = File(pdf.parentFile, "rendered-${pdf.nameWithoutExtension}")
         val renderer = try {
-            ProcessBuilder("pdftoppm", "-png", file.absolutePath, prefix.absolutePath)
+            ProcessBuilder("pdftoppm", "-png", pdf.absolutePath, prefix.absolutePath)
                 .redirectErrorStream(true)
                 .start()
         } catch (_: IOException) {
@@ -88,7 +111,7 @@ class PdfDocumentWriterTest {
         }
         val renderOutput = renderer.inputStream.bufferedReader().use { it.readText() }
         assertEquals(renderOutput, 0, renderer.waitFor())
-        val renderedPages = file.parentFile?.listFiles().orEmpty().count {
+        val renderedPages = pdf.parentFile?.listFiles().orEmpty().count {
             it.name.startsWith("${prefix.name}-") && it.extension == "png"
         }
         assertEquals(renderOutput, expectedPages, renderedPages)

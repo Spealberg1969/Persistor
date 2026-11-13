@@ -1,5 +1,18 @@
 package com.persistor
 
+import android.content.pm.ActivityInfo
+import android.view.Surface
+
+internal fun captureAngle(currentAngle: Int, lockedAngle: Int?): Int =
+    (lockedAngle ?: currentAngle).mod(360)
+
+internal fun requestedOrientationForRotation(rotation: Int): Int = when (rotation) {
+    Surface.ROTATION_90 -> ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+    Surface.ROTATION_180 -> ActivityInfo.SCREEN_ORIENTATION_REVERSE_PORTRAIT
+    Surface.ROTATION_270 -> ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE
+    else -> ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+}
+
 /** Camera2 JPEG_ORIENTATION for the rear-facing cameras exposed by Persistor. */
 internal fun jpegOrientationDegrees(sensorOrientation: Int, deviceOrientation: Int): Int =
     (sensorOrientation + deviceOrientation).mod(360)

@@ -118,11 +118,13 @@ class CameraController(
     @Volatile private var clean = true
     @Volatile private var latestDeviceAngle = 0
     @Volatile private var pendingAngle = 0
+    @Volatile private var pendingAngleLocked = false
     @Volatile private var pendingOutputDimensions: Pair<Int, Int>? = null
     @Volatile private var pendingOutputMode: CameraOutputMode = CameraOutputMode.PHOTO
     @Volatile var overlaySettings: CameraOverlaySettings = CameraOverlaySettings()
     @Volatile private var pendingOverlaySettings = CameraOverlaySettings()
     @Volatile private var pendingCaptureTime = 0L
+    @Volatile private var pendingOrientationUnlock: (() -> Unit)? = null
     @Volatile private var waitingLock = false
     @Volatile private var focusRect: MeteringRectangle? = null
 
@@ -341,6 +343,7 @@ class CameraController(
         handler.removeCallbacks(afTimeout)
         waitingLock = false
         busy = false
+        completePendingOrientationLock()
         manualFocus = false
         focusRect = null
         runCatching { session?.close() }
@@ -524,14 +527,22 @@ class CameraController(
         latestDeviceAngle = deviceAngle.mod(360)
     }
 
-    fun takePicture(deviceAngle: Int) {
-        val s = session ?: return
-        val b = previewBuilder ?: return
+    fun takePicture(deviceAngle: Int, lockedAngle: Int? = null, onLockConsumed: () -> Unit = {}) {
         if (busy) return
+        val s = session
+        val b = previewBuilder
+        if (s == null || b == null) {
+            if (lockedAngle != null) onLockConsumed()
+            return
+        }
         busy = true
         pendingOutputMode = outputMode
         updateDeviceAngle(deviceAngle)
-        pendingAngle = latestDeviceAngle
+        synchronized(this) {
+            pendingAngleLocked = lockedAngle != null
+            pendingAngle = captureAngle(latestDeviceAngle, lockedAngle)
+            pendingOrientationUnlock = onLockConsumed.takeIf { lockedAngle != null }
+        }
         pendingOutputDimensions = planInUse?.outputDimensionsForDeviceAngle(pendingAngle)
         pendingOverlaySettings = overlaySettings
         pendingCaptureTime = System.currentTimeMillis()
@@ -544,6 +555,7 @@ class CameraController(
         } catch (e: Exception) {
             busy = false
             waitingLock = false
+            completePendingOrientationLock()
             onError("Не удалось сфокусироваться: ${e.message}")
         }
     }
@@ -552,10 +564,14 @@ class CameraController(
         val dev = camera
         val s = session
         val r = reader
-        if (dev == null || s == null || r == null) { busy = false; return }
+        if (dev == null || s == null || r == null) {
+            busy = false
+            completePendingOrientationLock()
+            return
+        }
         try {
-            // The autofocus wait can span a physical rotation; use the most recent sensor angle.
-            pendingAngle = latestDeviceAngle
+            // Keep a locked one-shot angle throughout autofocus; otherwise use the latest sensor angle.
+            if (!pendingAngleLocked) pendingAngle = latestDeviceAngle
             pendingOutputDimensions = planInUse?.outputDimensionsForDeviceAngle(pendingAngle)
             val b = dev.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE)
             b.addTarget(r.surface)
@@ -569,12 +585,14 @@ class CameraController(
 
                 override fun onCaptureFailed(session: CameraCaptureSession, request: CaptureRequest, failure: CaptureFailure) {
                     busy = false
+                    completePendingOrientationLock()
                     onError("Снимок не удался (код ${failure.reason})")
                     unlockFocus()
                 }
             }, handler)
         } catch (e: Exception) {
             busy = false
+            completePendingOrientationLock()
             onError("Не удалось сделать снимок: ${e.message}")
         }
     }
@@ -594,10 +612,19 @@ class CameraController(
 
     private fun onImage(r: ImageReader) {
         val image = try { r.acquireNextImage() } catch (e: Exception) { null }
-        if (image == null) { busy = false; return }
+        if (image == null) {
+            busy = false
+            completePendingOrientationLock()
+            return
+        }
         val bytes = try {
             val buf = image.planes[0].buffer
             ByteArray(buf.remaining()).also { buf.get(it) }
+        } catch (failure: Throwable) {
+            busy = false
+            completePendingOrientationLock()
+            onError("Не удалось прочитать кадр камеры: ${failure.message ?: failure.javaClass.simpleName}")
+            return
         } finally {
             image.close()
         }
@@ -632,7 +659,16 @@ class CameraController(
             onError("Не удалось обработать снимок: ${e.message ?: e.javaClass.simpleName}")
         } finally {
             if (!deferredBusyReset) busy = false
+            completePendingOrientationLock()
         }
+    }
+
+    private fun completePendingOrientationLock() {
+        val callback = synchronized(this) {
+            pendingAngleLocked = false
+            pendingOrientationUnlock.also { pendingOrientationUnlock = null }
+        }
+        callback?.invoke()
     }
 
     private fun save(bytes: ByteArray) {

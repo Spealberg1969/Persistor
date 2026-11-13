@@ -16,6 +16,15 @@ data class ImageItem(
     val mimeType: String = "image/jpeg",
 ) {
     val isPdf: Boolean get() = mimeType.equals("application/pdf", ignoreCase = true) || name.endsWith(".pdf", ignoreCase = true)
+    val isJpeg: Boolean get() = mimeType.equals("image/jpeg", ignoreCase = true) ||
+        name.endsWith(".jpg", ignoreCase = true) || name.endsWith(".jpeg", ignoreCase = true)
+}
+
+internal fun categorySelectionIndices(jpegFlags: List<Boolean>, pdfFlags: List<Boolean>, pdf: Boolean): Set<Int> {
+    require(jpegFlags.size == pdfFlags.size) { "Category flags must have matching lengths" }
+    return jpegFlags.indices.filterTo(linkedSetOf()) { index ->
+        if (pdf) pdfFlags[index] else jpegFlags[index]
+    }
 }
 
 class ImageRepository(private val context: Context) {

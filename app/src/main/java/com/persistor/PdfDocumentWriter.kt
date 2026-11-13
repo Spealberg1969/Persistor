@@ -6,7 +6,14 @@ import java.nio.charset.StandardCharsets
 import java.util.Locale
 import kotlin.math.min
 
-internal data class PdfJpegPage(val file: File, val width: Int, val height: Int)
+internal data class PdfJpegPage(
+    val file: File,
+    val width: Int,
+    val height: Int,
+    val pageWidthPoints: Float? = null,
+    val pageHeightPoints: Float? = null,
+    val marginPoints: Float? = null,
+)
 
 /** Minimal standards-based PDF writer; JPEG page bytes remain JPEG image XObjects. */
 internal object PdfDocumentWriter {
@@ -18,6 +25,18 @@ internal object PdfDocumentWriter {
         require(pages.isNotEmpty()) { "PDF must contain at least one page" }
         pages.forEach { page ->
             require(page.width > 0 && page.height > 0) { "Invalid image page dimensions" }
+            require((page.pageWidthPoints == null) == (page.pageHeightPoints == null)) {
+                "Both PDF page dimensions must be specified together"
+            }
+            require(page.pageWidthPoints == null || page.pageWidthPoints.isFinite() && page.pageWidthPoints > 0f) {
+                "Invalid PDF page width"
+            }
+            require(page.pageHeightPoints == null || page.pageHeightPoints.isFinite() && page.pageHeightPoints > 0f) {
+                "Invalid PDF page height"
+            }
+            require(page.marginPoints == null || page.marginPoints.isFinite() && page.marginPoints >= 0f) {
+                "Invalid PDF page margin"
+            }
             require(page.file.isFile && page.file.length() >= 4L) { "JPEG page file is missing or empty" }
             RandomAccessFile(page.file, "r").use { jpeg ->
                 require(jpeg.readUnsignedByte() == 0xFF && jpeg.readUnsignedByte() == 0xD8) {
@@ -53,16 +72,18 @@ internal object PdfDocumentWriter {
                 val contentObject = pageObject + 1
                 val imageObject = pageObject + 2
                 val portrait = page.height >= page.width
-                val pageWidth = if (portrait) A4_PORTRAIT_WIDTH else A4_PORTRAIT_HEIGHT
-                val pageHeight = if (portrait) A4_PORTRAIT_HEIGHT else A4_PORTRAIT_WIDTH
+                val pageWidth = page.pageWidthPoints ?: if (portrait) A4_PORTRAIT_WIDTH else A4_PORTRAIT_HEIGHT
+                val pageHeight = page.pageHeightPoints ?: if (portrait) A4_PORTRAIT_HEIGHT else A4_PORTRAIT_WIDTH
+                val margin = page.marginPoints ?: if (page.pageWidthPoints == null) PAGE_MARGIN else 0f
+                require(margin * 2f < min(pageWidth, pageHeight)) { "PDF page margin is too large" }
                 val scale = min(
-                    (pageWidth - PAGE_MARGIN * 2f) / page.width,
-                    (pageHeight - PAGE_MARGIN * 2f) / page.height,
+                    (pageWidth - margin * 2f) / page.width,
+                    (pageHeight - margin * 2f) / page.height,
                 )
                 val drawWidth = page.width * scale
                 val drawHeight = page.height * scale
-                val drawX = (pageWidth - drawWidth) / 2f
-                val drawY = (pageHeight - drawHeight) / 2f
+                val drawX = margin + (pageWidth - margin * 2f - drawWidth) / 2f
+                val drawY = margin + (pageHeight - margin * 2f - drawHeight) / 2f
                 val content = String.format(
                     Locale.US,
                     "q\n%.4f 0 0 %.4f %.4f %.4f cm\n/Im0 Do\nQ\n",

@@ -55,6 +55,7 @@ class FolderStore(private val context: Context) {
     private val OUTPUT = stringPreferencesKey("output")
     private val ARCHIVE = stringPreferencesKey("archive")
     private val SSIM = doublePreferencesKey("ssim")
+    private val COMPRESS_PDF = booleanPreferencesKey("compress_pdf")
     private val DEL_TEMP = booleanPreferencesKey("del_temp")
     private val DEL_ORIG = booleanPreferencesKey("del_orig")
     private val COMPRESSION_METHOD = stringPreferencesKey("compression_method")
@@ -90,6 +91,7 @@ class FolderStore(private val context: Context) {
     val settings: Flow<ProcessSettings> = context.dataStore.data.map { p ->
         ProcessSettings(
             ssimTarget = p[SSIM] ?: 0.95,
+            compressPdf = p[COMPRESS_PDF] ?: true,
             deleteTempFolder = p[DEL_TEMP] ?: true,
             deleteOriginals = p[DEL_ORIG] ?: false,
             compressionMethod = CompressionMethod.fromKey(p[COMPRESSION_METHOD]),
@@ -137,6 +139,7 @@ class FolderStore(private val context: Context) {
     suspend fun setOutput(uri: Uri) = context.dataStore.edit { it[OUTPUT] = uri.toString() }
     suspend fun setArchive(uri: Uri) = context.dataStore.edit { it[ARCHIVE] = uri.toString() }
     suspend fun setSsim(v: Double) = context.dataStore.edit { it[SSIM] = v }
+    suspend fun setCompressPdf(v: Boolean) = context.dataStore.edit { it[COMPRESS_PDF] = v }
     suspend fun setDeleteTemp(v: Boolean) = context.dataStore.edit { it[DEL_TEMP] = v }
     suspend fun setDeleteOriginals(v: Boolean) = context.dataStore.edit { it[DEL_ORIG] = v }
     suspend fun setCompressionMethod(v: CompressionMethod) =

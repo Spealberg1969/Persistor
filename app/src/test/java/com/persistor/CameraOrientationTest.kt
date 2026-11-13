@@ -1,9 +1,25 @@
 package com.persistor
 
+import android.content.pm.ActivityInfo
+import android.view.Surface
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class CameraOrientationTest {
+    @Test
+    fun oneShotLockUsesLockedAngleAndUnlockedCaptureUsesCurrentAngle() {
+        assertEquals(270, captureAngle(currentAngle = 90, lockedAngle = 270))
+        assertEquals(90, captureAngle(currentAngle = 450, lockedAngle = null))
+    }
+
+    @Test
+    fun displayRotationMapsToMatchingFixedActivityOrientation() {
+        assertEquals(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT, requestedOrientationForRotation(Surface.ROTATION_0))
+        assertEquals(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE, requestedOrientationForRotation(Surface.ROTATION_90))
+        assertEquals(ActivityInfo.SCREEN_ORIENTATION_REVERSE_PORTRAIT, requestedOrientationForRotation(Surface.ROTATION_180))
+        assertEquals(ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE, requestedOrientationForRotation(Surface.ROTATION_270))
+    }
+
     @Test
     fun rearCameraJpegOrientationUsesCamera2ClockwiseFormula() {
         assertEquals(90, jpegOrientationDegrees(90, 0))
