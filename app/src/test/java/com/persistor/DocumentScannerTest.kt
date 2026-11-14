@@ -78,6 +78,62 @@ class DocumentScannerTest {
     }
 
     @Test
+    fun trackerRequiresThreeConsistentFramesBeforeAcceptingGreenQuad() {
+        val tracker = DocumentQuadStabilizer()
+
+        val first = tracker.observe(sampleQuad())
+        val second = tracker.observe(sampleQuad(dx = 0.01f))
+        val third = tracker.observe(sampleQuad(dx = 0.02f))
+
+        assertNull(first.stable)
+        assertEquals(1, first.consecutiveFrames)
+        assertNull(second.stable)
+        assertEquals(2, second.consecutiveFrames)
+        assertNotNull(third.stable)
+        assertNull(third.candidate)
+    }
+
+    @Test
+    fun trackerDoesNotJumpToAnInconsistentRectangle() {
+        val tracker = DocumentQuadStabilizer()
+        repeat(3) { tracker.observe(sampleQuad()) }
+
+        val jump = tracker.observe(sampleQuad(dx = 0.20f))
+        val nextDifferent = tracker.observe(sampleQuad(dx = 0.35f))
+
+        assertNull(jump.stable)
+        assertNotNull(jump.candidate)
+        assertNull(nextDifferent.stable)
+        assertEquals(1, nextDifferent.consecutiveFrames)
+
+        repeat(2) { tracker.observe(sampleQuad(dx = 0.35f)) }
+        val accepted = tracker.observe(sampleQuad(dx = 0.35f))
+        assertNotNull(accepted.stable)
+        assertNull(accepted.candidate)
+    }
+
+    @Test
+    fun trackerSmoothsSmallMotionAndClearsAfterThreeMisses() {
+        val tracker = DocumentQuadStabilizer()
+        repeat(3) { tracker.observe(sampleQuad()) }
+
+        val smoothed = tracker.observe(sampleQuad(dx = 0.02f))
+        assertNotNull(smoothed.stable)
+        assertTrue(smoothed.stable!!.topLeft.x < 0.12f)
+        assertNotNull(tracker.observe(null).stable)
+        assertNotNull(tracker.observe(null).stable)
+        assertNull(tracker.observe(null).stable)
+    }
+
+    @Test
+    fun automaticDetectionRejectsLowConfidenceButAllowsManualQuad() {
+        assertFalse(sampleQuad(confidence = 0.49f).isReliableAutomaticCandidate())
+        assertTrue(sampleQuad(confidence = 0.50f).isReliableAutomaticCandidate())
+        // Manual overrides are applied directly by the image processor and are not confidence-gated.
+        assertEquals(1f, sampleQuad(confidence = 1f).confidence)
+    }
+
+    @Test
     fun mapsManualPointsFromNarrowerViewportIntoWiderSource() {
         val viewport = sampleQuad()
         val mapped = DocumentImageProcessor.mapViewportQuadToFrame(viewport, sourceAspect = 2f, viewportAspect = 1f)
@@ -126,7 +182,33 @@ class DocumentScannerTest {
         assertEquals(0.87f, found.bottomRight.y, 0.08f)
         assertEquals(0.17f, found.bottomLeft.x, 0.08f)
         assertEquals(0.82f, found.bottomLeft.y, 0.08f)
-        assertTrue(found.confidence >= 0.25f)
+        assertTrue(found.confidence >= MIN_AUTO_DOCUMENT_CONFIDENCE)
+    }
+
+    @Test
+    fun detectorPrefersOuterDocumentBoundaryOverInternalPrintedGrid() {
+        val width = 320
+        val height = 240
+        val gray = ByteArray(width * height) { 225.toByte() }
+        val outer = listOf(42 to 22, 278 to 34, 267 to 216, 50 to 205)
+        val inner = listOf(95 to 70, 232 to 72, 230 to 174, 98 to 171)
+        listOf(outer to 55, inner to 8).forEach { (corners, value) ->
+            corners.indices.forEach { i ->
+                val a = corners[i]
+                val b = corners[(i + 1) % corners.size]
+                drawLine(gray, width, a.first, a.second, b.first, b.second, value)
+            }
+        }
+        drawLine(gray, width, 162, 72, 162, 171, 8)
+        drawLine(gray, width, 98, 120, 230, 120, 8)
+
+        val found = DocumentQuadDetector.detectGray(width, height, gray)
+
+        assertNotNull("Expected the detector to prefer the outer page boundary", found)
+        assertEquals(0.13f, found!!.topLeft.x, 0.10f)
+        assertEquals(0.09f, found.topLeft.y, 0.10f)
+        assertEquals(0.87f, found.topRight.x, 0.10f)
+        assertEquals(0.14f, found.topRight.y, 0.10f)
     }
 
     private fun drawLine(gray: ByteArray, width: Int, x0: Int, y0: Int, x1: Int, y1: Int, value: Int) {
@@ -152,11 +234,11 @@ class DocumentScannerTest {
         }
     }
 
-    private fun sampleQuad() = DocumentQuad(
-        topLeft = DocumentPoint(0.1f, 0.1f),
-        topRight = DocumentPoint(0.9f, 0.1f),
-        bottomRight = DocumentPoint(0.9f, 0.9f),
-        bottomLeft = DocumentPoint(0.1f, 0.9f),
-        confidence = 1f,
+    private fun sampleQuad(dx: Float = 0f, confidence: Float = 1f) = DocumentQuad(
+        topLeft = DocumentPoint(0.1f + dx, 0.1f),
+        topRight = DocumentPoint(0.9f + dx, 0.1f),
+        bottomRight = DocumentPoint(0.9f + dx, 0.9f),
+        bottomLeft = DocumentPoint(0.1f + dx, 0.9f),
+        confidence = confidence,
     )
 }

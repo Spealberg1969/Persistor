@@ -264,6 +264,8 @@ fun CameraScreen(angleState: MutableIntState) {
     var lensMenu by remember { mutableStateOf(false) }
     var focusMark by remember { mutableStateOf<Offset?>(null) }
     var detectedDocument by remember { mutableStateOf<DocumentQuad?>(null) }
+    var candidateDocument by remember { mutableStateOf<DocumentQuad?>(null) }
+    var documentDetectionProgress by remember { mutableIntStateOf(0) }
     var manualDocumentFrame by remember { mutableStateOf(false) }
     var manualDocumentQuad by remember { mutableStateOf<DocumentQuad?>(null) }
 
@@ -357,7 +359,11 @@ fun CameraScreen(angleState: MutableIntState) {
         controller.saveDir = target
         controller.overlaySettings = overlaySettings
         controller.documentSettings = documentSettings
-        controller.documentQuadOverride = manualDocumentQuad.takeIf { manualDocumentFrame && documentSettings.enabled }
+        controller.documentQuadOverride = when {
+            !documentSettings.enabled -> null
+            manualDocumentFrame -> manualDocumentQuad
+            else -> detectedDocument
+        }
         controller.updateDeviceAngle(angleState.intValue)
         controller.outputMode = captureMode
     }
@@ -432,6 +438,9 @@ fun CameraScreen(angleState: MutableIntState) {
     val rotationHolder = rememberUpdatedState(rotation)
     LaunchedEffect(documentSettings.enabled, hasPermission, plan) {
         detectedDocument = null
+        candidateDocument = null
+        documentDetectionProgress = 0
+        val stabilizer = DocumentQuadStabilizer()
         if (!documentSettings.enabled || !hasPermission || plan == null) return@LaunchedEffect
         while (true) {
             val textureView = tvRef.value
@@ -451,7 +460,10 @@ fun CameraScreen(angleState: MutableIntState) {
                     } finally {
                         bitmap.recycle()
                     }
-                    detectedDocument = result
+                    val tracking = stabilizer.observe(result?.takeIf { it.isReliableAutomaticCandidate() })
+                    detectedDocument = tracking.stable
+                    candidateDocument = tracking.candidate
+                    documentDetectionProgress = tracking.consecutiveFrames
                 }
             }
             delay(650)
@@ -720,9 +732,14 @@ fun CameraScreen(angleState: MutableIntState) {
                     when {
                         manualDocumentFrame -> "Перетащите маркеры к углам документа"
                         detectedDocument != null -> "Границы документа найдены · можно уточнить вручную"
+                        candidateDocument != null -> "Проверяем границы ${documentDetectionProgress}/3 · держите камеру неподвижно"
                         else -> "Наведите камеру на документ"
                     },
-                    color = if (manualDocumentFrame || detectedDocument != null) Color(0xFF9CCC65) else Color.LightGray,
+                    color = when {
+                        manualDocumentFrame || detectedDocument != null -> Color(0xFF9CCC65)
+                        candidateDocument != null -> Color(0xFFFFD180)
+                        else -> Color.LightGray
+                    },
                     style = MaterialTheme.typography.bodySmall,
                 )
                 controller.documentStatus?.let {
@@ -867,11 +884,13 @@ fun CameraScreen(angleState: MutableIntState) {
                             drawRect(Color.White.copy(alpha = 0.8f), Offset(left, top), Size(rw, rh), style = Stroke(2.dp.toPx()))
                         }
                         if (documentSettings.enabled) {
-                            (if (manualDocumentFrame) manualDocumentQuad else detectedDocument)?.let { quad ->
+                            val acceptedFrame = manualDocumentFrame || detectedDocument != null
+                            (if (manualDocumentFrame) manualDocumentQuad else detectedDocument ?: candidateDocument)?.let { quad ->
+                                val frameColor = if (acceptedFrame) Color(0xFF76FF03) else Color(0xFFFFD180)
                                 val corners = quad.points().map { Offset(it.x * size.width, it.y * size.height) }
                                 corners.indices.forEach { i ->
-                                    drawLine(Color(0xFF76FF03), corners[i], corners[(i + 1) % corners.size], strokeWidth = 3.dp.toPx())
-                                    drawCircle(Color(0xFF76FF03), radius = 5.dp.toPx(), center = corners[i])
+                                    drawLine(frameColor, corners[i], corners[(i + 1) % corners.size], strokeWidth = 3.dp.toPx())
+                                    drawCircle(frameColor, radius = 5.dp.toPx(), center = corners[i])
                                 }
                             }
                         }

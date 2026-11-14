@@ -33,6 +33,101 @@ data class DocumentQuad(
     fun points(): List<DocumentPoint> = listOf(topLeft, topRight, bottomRight, bottomLeft)
 }
 
+internal const val MIN_AUTO_DOCUMENT_CONFIDENCE = 0.50f
+
+internal fun DocumentQuad.isReliableAutomaticCandidate(): Boolean =
+    confidence >= MIN_AUTO_DOCUMENT_CONFIDENCE
+
+data class DocumentQuadTrackingState(
+    val stable: DocumentQuad?,
+    val candidate: DocumentQuad?,
+    val consecutiveFrames: Int,
+    val requiredFrames: Int,
+)
+
+/** Suppresses frame-to-frame Hough jitter and rejects isolated alternate rectangles. */
+class DocumentQuadStabilizer(
+    private val requiredFrames: Int = 3,
+    private val matchDistance: Float = 0.04f,
+    private val stableDistance: Float = 0.04f,
+    private val smoothing: Float = 0.25f,
+    private val missingFramesToReset: Int = 3,
+) {
+    private var accepted: DocumentQuad? = null
+    private var candidate: DocumentQuad? = null
+    private var candidateFrames = 0
+    private var missedFrames = 0
+
+    init {
+        require(requiredFrames >= 2)
+        require(matchDistance > 0f && stableDistance > 0f)
+        require(smoothing in 0f..1f && missingFramesToReset >= 1)
+    }
+
+    fun reset() {
+        accepted = null
+        candidate = null
+        candidateFrames = 0
+        missedFrames = 0
+    }
+
+    fun observe(detected: DocumentQuad?): DocumentQuadTrackingState {
+        if (detected == null) {
+            missedFrames++
+            candidate = null
+            candidateFrames = 0
+            if (missedFrames >= missingFramesToReset) accepted = null
+            return DocumentQuadTrackingState(accepted, null, 0, requiredFrames)
+        }
+
+        missedFrames = 0
+        val current = accepted
+        if (current != null && maximumCornerDistance(current, detected) <= stableDistance) {
+            accepted = blend(current, detected, smoothing)
+            candidate = null
+            candidateFrames = 0
+            return DocumentQuadTrackingState(accepted, null, requiredFrames, requiredFrames)
+        }
+
+        val previousCandidate = candidate
+        if (previousCandidate != null && maximumCornerDistance(previousCandidate, detected) <= matchDistance) {
+            candidate = blend(previousCandidate, detected, smoothing)
+            candidateFrames++
+        } else {
+            candidate = detected
+            candidateFrames = 1
+        }
+
+        if (candidateFrames >= requiredFrames) {
+            accepted = candidate
+            candidate = null
+            candidateFrames = 0
+            return DocumentQuadTrackingState(accepted, null, requiredFrames, requiredFrames)
+        }
+        // Hide an old accepted frame while a contradictory rectangle is being verified.
+        return DocumentQuadTrackingState(null, candidate, candidateFrames, requiredFrames)
+    }
+
+    private fun maximumCornerDistance(a: DocumentQuad, b: DocumentQuad): Float =
+        a.points().zip(b.points()).maxOf { (first, second) ->
+            hypot(first.x - second.x, first.y - second.y)
+        }
+
+    private fun blend(a: DocumentQuad, b: DocumentQuad, amount: Float): DocumentQuad {
+        fun point(first: DocumentPoint, second: DocumentPoint) = DocumentPoint(
+            first.x + (second.x - first.x) * amount,
+            first.y + (second.y - first.y) * amount,
+        )
+        return DocumentQuad(
+            topLeft = point(a.topLeft, b.topLeft),
+            topRight = point(a.topRight, b.topRight),
+            bottomRight = point(a.bottomRight, b.bottomRight),
+            bottomLeft = point(a.bottomLeft, b.bottomLeft),
+            confidence = a.confidence + (b.confidence - a.confidence) * amount,
+        )
+    }
+}
+
 enum class DocumentCaptureProfile(
     val key: String,
     val title: String,
@@ -206,6 +301,29 @@ object DocumentQuadDetector {
         }
         if (pairs.size < 2) return null
 
+        fun edgeCoverage(a: PointD, b: PointD): Double {
+            val steps = max(12, (distance(a, b) / 6.0).roundToInt())
+            var supported = 0
+            for (step in 0..steps) {
+                val fraction = step.toDouble() / steps
+                val x = (a.x + (b.x - a.x) * fraction).roundToInt()
+                val y = (a.y + (b.y - a.y) * fraction).roundToInt()
+                var hasEdge = false
+                loop@ for (dy in -2..2) for (dx in -2..2) {
+                    val px = x + dx
+                    val py = y + dy
+                    if (px in 1 until width - 1 && py in 1 until height - 1 &&
+                        magnitude[py * width + px] >= threshold
+                    ) {
+                        hasEdge = true
+                        break@loop
+                    }
+                }
+                if (hasEdge) supported++
+            }
+            return supported.toDouble() / (steps + 1)
+        }
+
         var best: Candidate? = null
         for (i in pairs.indices) for (j in i + 1 until pairs.size) {
             val a = pairs[i]
@@ -226,12 +344,15 @@ object DocumentQuadDetector {
             if (areaRatio !in 0.12..0.94 || !isConvex(ordered)) continue
             val sides = ordered.indices.map { k -> distance(ordered[k], ordered[(k + 1) % 4]) }
             if (sides.minOrNull()!! < minSide) continue
+            val continuity = ordered.indices.map { k -> edgeCoverage(ordered[k], ordered[(k + 1) % 4]) }
+            if (continuity.any { it < 0.40 }) continue
             val aspect = max(sides[0], sides[2]) / min(sides[1], sides[3]).coerceAtLeast(1.0)
             if (aspect !in 0.24..4.2) continue
             val support = minOf(a.a.votes, a.b.votes, b.a.votes, b.b.votes)
             val confidence = (support / (min(width, height) * 0.38f)).coerceIn(0f, 1f)
             if (confidence < 0.25f) continue
-            val score = support + (a.support + b.support) * 0.12 + areaRatio * min(width, height) * 0.18
+            val score = support + (a.support + b.support) * 0.12 +
+                areaRatio * min(width, height) * 0.42 + continuity.minOrNull()!! * min(width, height) * 0.15
             if (best == null || score > best!!.score) best = Candidate(ordered, confidence, score)
         }
         val result = best ?: return null
@@ -399,7 +520,7 @@ object DocumentImageProcessor {
         try {
             val quad = quadOverride?.let {
                 mapViewportQuadToFrame(it, oriented.width.toFloat() / oriented.height, manualViewportAspect)
-            } ?: DocumentQuadDetector.detect(oriented)
+            } ?: DocumentQuadDetector.detect(oriented)?.takeIf { it.isReliableAutomaticCandidate() }
             val warped = quad?.let { perspectiveCrop(oriented, it, profile.maxLongEdge) }
             val source = warped ?: oriented
             try {
