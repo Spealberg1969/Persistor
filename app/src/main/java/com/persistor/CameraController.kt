@@ -30,6 +30,8 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executor
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.roundToInt
@@ -94,11 +96,16 @@ class CameraController(
     private val thread = HandlerThread("persistor-camera").apply { start() }
     private val handler = Handler(thread.looper)
     private val executor = Executor { handler.post(it) }
+    private val imageProcessingExecutor: ExecutorService = Executors.newSingleThreadExecutor { task ->
+        Thread(task, "PersistorImageProcessing").apply { priority = Thread.NORM_PRIORITY }
+    }
 
     @Volatile var saveDir: Uri? = null
     var busy by mutableStateOf(false)
         private set
     var manualFocus by mutableStateOf(false)
+        private set
+    var documentStatus by mutableStateOf<String?>(null)
         private set
 
     private var camera: CameraDevice? = null
@@ -114,6 +121,9 @@ class CameraController(
     private var gen = 0
 
     @Volatile var outputMode: CameraOutputMode = CameraOutputMode.PHOTO
+    @Volatile var documentSettings: DocumentCaptureSettings = DocumentCaptureSettings()
+    @Volatile var documentQuadOverride: DocumentQuad? = null
+    @Volatile var documentViewportAspect: Float? = null
     @Volatile private var torch = false
     @Volatile private var clean = true
     @Volatile private var latestDeviceAngle = 0
@@ -365,6 +375,7 @@ class CameraController(
 
     fun release() {
         close()
+        imageProcessingExecutor.shutdown()
         thread.quitSafely()
     }
 
@@ -628,30 +639,69 @@ class CameraController(
         } finally {
             image.close()
         }
+        try {
+            imageProcessingExecutor.execute { processCapturedImage(bytes) }
+        } catch (failure: Exception) {
+            busy = false
+            completePendingOrientationLock()
+            onError("Не удалось запустить обработку снимка: ${failure.message ?: failure.javaClass.simpleName}")
+        }
+    }
+
+    private fun processCapturedImage(bytes: ByteArray) {
         var deferredBusyReset = false
         try {
             val plan = planInUse
-            val out = if (plan != null && plan.resolution is Resolution.Custom) {
+            val scanSettings = documentSettings
+            val output = if (scanSettings.enabled) {
                 try {
-                    val (targetWidth, targetHeight) = pendingOutputDimensions
-                        ?: (plan.outputSize.width to plan.outputSize.height)
-                    PhotoProcessor.cropResize(bytes, targetWidth, targetHeight)
-                } catch (e: Throwable) {
-                    onError("Не удалось обработать снимок: ${e.message}")
+                    val result = DocumentImageProcessor.processJpeg(
+                        jpeg = bytes,
+                        profile = scanSettings.profile,
+                        stamp = pendingOverlaySettings,
+                        timestampMillis = pendingCaptureTime,
+                        fitByteTarget = !pendingOutputMode.isPdf,
+                        quadOverride = documentQuadOverride,
+                        manualViewportAspect = documentViewportAspect,
+                    )
+                    documentStatus = when {
+                        !result.detected -> "Границы документа не найдены · кадр сохранён целиком"
+                        pendingOutputMode.isPdf -> "Страница PDF ${result.width}×${result.height} px · качество PDF задаётся отдельно"
+                        result.targetReached == false -> "Документ ${result.width}×${result.height} · цель размера недостижима"
+                        else -> "Документ ${result.width}×${result.height} · ${result.bytes.size / 1024} КБ"
+                    }
+                    result.bytes
+                } catch (failure: OutOfMemoryError) {
+                    documentStatus = "Не хватило памяти для сканирования · сохранён исходный кадр"
                     bytes
+                } catch (failure: Exception) {
+                    documentStatus = "Сканирование не удалось · сохранён исходный кадр"
+                    onError("Не удалось обработать документ: ${failure.message ?: failure.javaClass.simpleName}")
+                    CameraOverlayRenderer.applyToJpeg(bytes, pendingOverlaySettings, pendingCaptureTime)
                 }
-            } else bytes
-            val stamped = CameraOverlayRenderer.applyToJpeg(out, pendingOverlaySettings, pendingCaptureTime)
+            } else {
+                val cropped = if (plan != null && plan.resolution is Resolution.Custom) {
+                    try {
+                        val (targetWidth, targetHeight) = pendingOutputDimensions
+                            ?: (plan.outputSize.width to plan.outputSize.height)
+                        PhotoProcessor.cropResize(bytes, targetWidth, targetHeight)
+                    } catch (failure: Throwable) {
+                        onError("Не удалось обработать снимок: ${failure.message}")
+                        bytes
+                    }
+                } else bytes
+                CameraOverlayRenderer.applyToJpeg(cropped, pendingOverlaySettings, pendingCaptureTime)
+            }
             if (pendingOutputMode.isPdf) {
                 deferredBusyReset = true
                 try {
-                    onPdfCaptured(stamped, pendingOutputMode) { busy = false }
+                    onPdfCaptured(output, pendingOutputMode) { busy = false }
                 } catch (failure: Throwable) {
                     deferredBusyReset = false
                     throw failure
                 }
             } else {
-                save(stamped)
+                save(output)
             }
         } catch (e: OutOfMemoryError) {
             onError("Не хватило памяти для обработки снимка. Файл не сохранён.")

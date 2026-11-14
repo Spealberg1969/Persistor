@@ -83,7 +83,7 @@ object CameraOverlayRenderer {
         }
 
         try {
-            drawStamp(output, lines, settings)
+            drawOnBitmap(output, settings, timestampMillis)
             val stream = ByteArrayOutputStream(bytes.size)
             check(output.compress(Bitmap.CompressFormat.JPEG, 100, stream)) {
                 "Не удалось сохранить снимок с надписью"
@@ -92,6 +92,13 @@ object CameraOverlayRenderer {
         } finally {
             output.recycle()
         }
+    }
+
+    /** Наносит тот же штамп непосредственно на bitmap перед финальным JPEG-кодированием. */
+    internal fun drawOnBitmap(bitmap: Bitmap, settings: CameraOverlaySettings, timestampMillis: Long) {
+        if (!settings.enabled) return
+        val stampLines = lines(settings, timestampMillis)
+        if (stampLines.isNotEmpty()) drawStamp(bitmap, stampLines, settings)
     }
 
     private fun drawStamp(bitmap: Bitmap, sourceLines: List<String>, settings: CameraOverlaySettings) {

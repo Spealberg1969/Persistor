@@ -26,6 +26,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
@@ -76,6 +77,30 @@ import java.io.File
 
 private const val MAX_PDF_SESSION_PAGES = 100
 private const val MAX_PDF_SESSION_BYTES = 256L * 1024L * 1024L
+
+private fun moveDocumentQuadCorner(quad: DocumentQuad, index: Int, dx: Float, dy: Float): DocumentQuad {
+    val points = quad.points().toMutableList()
+    val point = points[index]
+    points[index] = DocumentPoint((point.x + dx).coerceIn(0.005f, 0.995f), (point.y + dy).coerceIn(0.005f, 0.995f))
+    var sign = 0
+    for (i in points.indices) {
+        val a = points[i]
+        val b = points[(i + 1) % 4]
+        val c = points[(i + 2) % 4]
+        val cross = (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x)
+        if (kotlin.math.abs(cross) < 0.0005f) return quad
+        val current = if (cross > 0f) 1 else -1
+        if (sign != 0 && sign != current) return quad
+        sign = current
+    }
+    val area = kotlin.math.abs(points.indices.sumOf { i ->
+        val a = points[i]
+        val b = points[(i + 1) % points.size]
+        (a.x * b.y - b.x * a.y).toDouble()
+    }) / 2.0
+    if (area < 0.04) return quad
+    return quad.copy(topLeft = points[0], topRight = points[1], bottomRight = points[2], bottomLeft = points[3])
+}
 
 /**
  * Камера Persistor. Экран вращается вместе с телефоном по датчику положения,
@@ -198,6 +223,7 @@ fun CameraScreen(angleState: MutableIntState) {
     val cameraJpgFolder by store.cameraJpgFolder.collectAsState(initial = null)
     val cameraPdfFolder by store.cameraPdfFolder.collectAsState(initial = null)
     val overlaySettings by store.cameraOverlay.collectAsState(initial = CameraOverlaySettings())
+    val documentSettings by store.documentCapture.collectAsState(initial = DocumentCaptureSettings())
     var captureMode by remember { mutableStateOf(CameraOutputMode.PHOTO) }
     val target: Uri? = if (captureMode.isPdf) cameraPdfFolder else cameraJpgFolder
 
@@ -220,6 +246,7 @@ fun CameraScreen(angleState: MutableIntState) {
     var showOverlayDialog by remember { mutableStateOf(false) }
     var showCaptureModeMenu by remember { mutableStateOf(false) }
     var showPdfSettings by remember { mutableStateOf(false) }
+    var showDocumentProfileMenu by remember { mutableStateOf(false) }
     var pdfCodec by remember { mutableStateOf(PdfJpegCodec.ANDROID_JPEG) }
     var pdfQuality by remember { mutableIntStateOf(90) }
     val pdfPages = remember { mutableStateListOf<PdfJpegPage>() }
@@ -236,6 +263,9 @@ fun CameraScreen(angleState: MutableIntState) {
     var lensIdx by remember { mutableIntStateOf(-1) }
     var lensMenu by remember { mutableStateOf(false) }
     var focusMark by remember { mutableStateOf<Offset?>(null) }
+    var detectedDocument by remember { mutableStateOf<DocumentQuad?>(null) }
+    var manualDocumentFrame by remember { mutableStateOf(false) }
+    var manualDocumentQuad by remember { mutableStateOf<DocumentQuad?>(null) }
 
     LaunchedEffect(target) {
         reviewIdx = null
@@ -326,6 +356,8 @@ fun CameraScreen(angleState: MutableIntState) {
     SideEffect {
         controller.saveDir = target
         controller.overlaySettings = overlaySettings
+        controller.documentSettings = documentSettings
+        controller.documentQuadOverride = manualDocumentQuad.takeIf { manualDocumentFrame && documentSettings.enabled }
         controller.updateDeviceAngle(angleState.intValue)
         controller.outputMode = captureMode
     }
@@ -350,15 +382,32 @@ fun CameraScreen(angleState: MutableIntState) {
         lens?.let { runCatching { controller.nativeSizes(it) }.getOrDefault(emptyList()) }.orEmpty()
     }
     val resRaw by store.cameraRes.collectAsState(initial = null)
-    val resolution: Resolution = remember(resRaw, nativeSizes) {
+    val preferredResolution: Resolution = remember(resRaw, nativeSizes) {
         Resolution.decode(resRaw)
             ?: if (nativeSizes.any { it.width == 1600 && it.height == 1200 }) Resolution.Native(1600, 1200)
             else Resolution.Custom(1600, 1200)
+    }
+    val resolution: Resolution = remember(preferredResolution, nativeSizes, documentSettings) {
+        if (!documentSettings.enabled) preferredResolution
+        else documentSettings.profile.selectCaptureSize(
+            nativeSizes.map { DocumentCaptureSize(it.width, it.height) },
+        )?.let { Resolution.Native(it.width, it.height) } ?: preferredResolution
     }
 
     val planResult = remember(lens, resolution) { lens?.let { runCatching { controller.plan(it, resolution) } } }
     val plan = planResult?.getOrNull()
     val planError = planResult?.exceptionOrNull()?.message
+    val previewDeviceAngle = if (orientationLocked) lockedCaptureAngle else angleState.intValue
+    val documentViewportAspect = remember(plan, orientationLocked, lockedCaptureAngle, angleState.intValue, landscape) {
+        when {
+            plan == null -> null
+            plan.resolution is Resolution.Custom -> plan.outputDimensionsForDeviceAngle(previewDeviceAngle)
+                .let { (width, height) -> width.toFloat() / height }
+            landscape -> 1f / plan.uprightAspect
+            else -> plan.uprightAspect
+        }
+    }
+    SideEffect { controller.documentViewportAspect = documentViewportAspect }
 
     LaunchedEffect(torch) { controller.setTorch(torch) }
     LaunchedEffect(clean) { controller.setClean(clean) }
@@ -381,6 +430,33 @@ fun CameraScreen(angleState: MutableIntState) {
     val tvRef = remember { mutableStateOf<TextureView?>(null) }
     val planHolder = rememberUpdatedState(plan)
     val rotationHolder = rememberUpdatedState(rotation)
+    LaunchedEffect(documentSettings.enabled, hasPermission, plan) {
+        detectedDocument = null
+        if (!documentSettings.enabled || !hasPermission || plan == null) return@LaunchedEffect
+        while (true) {
+            val textureView = tvRef.value
+            if (!controller.busy && textureView?.isAvailable == true && textureView.width >= 64 && textureView.height >= 64) {
+                val scale = minOf(1f, 480f / maxOf(textureView.width, textureView.height))
+                val bitmap = runCatching {
+                    textureView.getBitmap(
+                        (textureView.width * scale).toInt().coerceAtLeast(64),
+                        (textureView.height * scale).toInt().coerceAtLeast(64),
+                    )
+                }.getOrNull()
+                if (bitmap != null) {
+                    val result = try {
+                        withContext(Dispatchers.Default) { DocumentQuadDetector.detect(bitmap) }
+                    } catch (_: Exception) {
+                        null
+                    } finally {
+                        bitmap.recycle()
+                    }
+                    detectedDocument = result
+                }
+            }
+            delay(650)
+        }
+    }
     val openCamera = rememberUpdatedState<() -> Unit>({
         val tv = tvRef.value
         val st = tv?.surfaceTexture
@@ -491,6 +567,67 @@ fun CameraScreen(angleState: MutableIntState) {
             }
         }
     }
+    val documentControls: @Composable () -> Unit = {
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+            PButton(
+                onClick = {
+                    if (documentSettings.enabled) {
+                        manualDocumentFrame = false
+                        manualDocumentQuad = null
+                    }
+                    scope.launch { store.setDocumentScanEnabled(!documentSettings.enabled) }
+                },
+                enabled = !controller.busy && !isFinalizingPdf,
+            ) {
+                Text(if (documentSettings.enabled) "Скан: вкл" else "Скан: выкл", color = Color.White)
+            }
+            if (documentSettings.enabled) {
+                Box {
+                    PButton(onClick = { showDocumentProfileMenu = true }) {
+                        Text("Цель: ${documentSettings.profile.title.substringBefore("·").trim()}", color = Color.White)
+                    }
+                    DropdownMenu(
+                        expanded = showDocumentProfileMenu,
+                        onDismissRequest = { showDocumentProfileMenu = false },
+                    ) {
+                        DocumentCaptureProfile.entries.forEach { profile ->
+                            DropdownMenuItem(
+                                text = { Text(profile.title) },
+                                onClick = {
+                                    scope.launch { store.setDocumentCaptureProfile(profile) }
+                                    showDocumentProfileMenu = false
+                                },
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+    val manualFrameBtn: @Composable () -> Unit = {
+        if (documentSettings.enabled) {
+            PButton(
+                onClick = {
+                    if (manualDocumentFrame) {
+                        manualDocumentFrame = false
+                        manualDocumentQuad = null
+                    } else {
+                        manualDocumentQuad = detectedDocument ?: DocumentQuad(
+                            topLeft = DocumentPoint(0.08f, 0.08f),
+                            topRight = DocumentPoint(0.92f, 0.08f),
+                            bottomRight = DocumentPoint(0.92f, 0.92f),
+                            bottomLeft = DocumentPoint(0.08f, 0.92f),
+                            confidence = 1f,
+                        )
+                        manualDocumentFrame = true
+                    }
+                },
+                enabled = !controller.busy && !isFinalizingPdf,
+            ) {
+                Text(if (manualDocumentFrame) "Готово с рамкой" else "Править углы", color = Color.White)
+            }
+        }
+    }
     val pdfSettingsBtn: @Composable () -> Unit = {
         if (captureMode.isPdf) {
             PButton(
@@ -559,7 +696,7 @@ fun CameraScreen(angleState: MutableIntState) {
     }
     val infoTexts: @Composable () -> Unit = {
         Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            if (plan != null) {
+            if (plan != null && !documentSettings.enabled) {
                 val (width, height) = plan.outputDimensionsForDeviceAngle(angleState.intValue)
                 val mp = width.toLong() * height / 1_000_000.0
                 val crop = if (plan.cropAspect != null) ", кроп" else ""
@@ -570,6 +707,27 @@ fun CameraScreen(angleState: MutableIntState) {
                     style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier.clickable { showResDialog = true },
                 )
+            }
+            if (documentSettings.enabled) {
+                val profile = documentSettings.profile
+                val captureSize = plan?.captureSize?.let { "${it.width}×${it.height}" } ?: "—"
+                PText(
+                    "Кадр $captureSize → документ ≤${profile.maxLongEdge} px · ${if (captureMode.isPdf) "страница PDF" else "≤${profile.maxBytes / 1024} КБ"}",
+                    color = Color.White,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                PText(
+                    when {
+                        manualDocumentFrame -> "Перетащите маркеры к углам документа"
+                        detectedDocument != null -> "Границы документа найдены · можно уточнить вручную"
+                        else -> "Наведите камеру на документ"
+                    },
+                    color = if (manualDocumentFrame || detectedDocument != null) Color(0xFF9CCC65) else Color.LightGray,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                controller.documentStatus?.let {
+                    PText(it, color = Color(0xFFFFD180), style = MaterialTheme.typography.bodySmall)
+                }
             }
             PText(
                 if (target != null) {
@@ -651,6 +809,9 @@ fun CameraScreen(angleState: MutableIntState) {
                 val aspect = if (plan.resolution is Resolution.Custom) previewCropAspect!!
                     else if (landscape) 1f / plan.uprightAspect else plan.uprightAspect
                 BoxWithConstraints(Modifier.aspectRatio(aspect)) {
+                    val manualQuadState = rememberUpdatedState(manualDocumentQuad)
+                    val previewWidthPx = with(LocalDensity.current) { maxWidth.toPx().coerceAtLeast(1f) }
+                    val previewHeightPx = with(LocalDensity.current) { maxHeight.toPx().coerceAtLeast(1f) }
                     AndroidView(
                         factory = { c ->
                             TextureView(c).apply {
@@ -705,8 +866,42 @@ fun CameraScreen(angleState: MutableIntState) {
                             drawRect(dim, Offset(left + rw, top), Size(w - left - rw, rh))
                             drawRect(Color.White.copy(alpha = 0.8f), Offset(left, top), Size(rw, rh), style = Stroke(2.dp.toPx()))
                         }
+                        if (documentSettings.enabled) {
+                            (if (manualDocumentFrame) manualDocumentQuad else detectedDocument)?.let { quad ->
+                                val corners = quad.points().map { Offset(it.x * size.width, it.y * size.height) }
+                                corners.indices.forEach { i ->
+                                    drawLine(Color(0xFF76FF03), corners[i], corners[(i + 1) % corners.size], strokeWidth = 3.dp.toPx())
+                                    drawCircle(Color(0xFF76FF03), radius = 5.dp.toPx(), center = corners[i])
+                                }
+                            }
+                        }
                         focusMark?.let {
                             drawCircle(Color(0xFFFFD54F), radius = 36.dp.toPx(), center = it, style = Stroke(3.dp.toPx()))
+                        }
+                    }
+                    if (documentSettings.enabled && manualDocumentFrame) {
+                        manualDocumentQuad?.points()?.forEachIndexed { cornerIndex, point ->
+                            Box(
+                                Modifier.offset(
+                                    x = maxWidth * point.x - 24.dp,
+                                    y = maxHeight * point.y - 24.dp,
+                                ).size(48.dp)
+                                    .pointerInput(cornerIndex, previewWidthPx, previewHeightPx) {
+                                        detectDragGestures { change, amount ->
+                                            change.consume()
+                                            val current = manualQuadState.value ?: return@detectDragGestures
+                                            manualDocumentQuad = moveDocumentQuadCorner(
+                                                current,
+                                                cornerIndex,
+                                                amount.x / previewWidthPx,
+                                                amount.y / previewHeightPx,
+                                            )
+                                        }
+                                    },
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Box(Modifier.size(18.dp).background(Color(0xFF76FF03), CircleShape))
+                            }
                         }
                     }
                     if (overlaySettings.enabled) {
@@ -786,6 +981,8 @@ fun CameraScreen(angleState: MutableIntState) {
                         focusBtn()
                         overlayBtn()
                         captureModeBtn()
+                        documentControls()
+                        manualFrameBtn()
                         pdfSettingsBtn()
                         pdfSessionControls()
                         cleanSw()
@@ -831,6 +1028,8 @@ fun CameraScreen(angleState: MutableIntState) {
                             pdfSettingsBtn()
                         }
                     }
+                    documentControls()
+                    manualFrameBtn()
                     pdfSessionControls()
                     Spacer(Modifier.height(8.dp))
                     // Кнопка спуска справа внизу

@@ -73,6 +73,8 @@ class FolderStore(private val context: Context) {
     private val CAM_OVERLAY_NAME = stringPreferencesKey("camera_overlay_name")
     private val CAM_OVERLAY_POSITION = stringPreferencesKey("camera_overlay_position")
     private val CAM_OVERLAY_FONT_SIZE = androidx.datastore.preferences.core.intPreferencesKey("camera_overlay_font_size")
+    private val CAMERA_DOCUMENT_SCAN = booleanPreferencesKey("camera_document_scan")
+    private val CAMERA_DOCUMENT_PROFILE = stringPreferencesKey("camera_document_profile")
 
     val sources: Flow<Set<Uri>> = context.dataStore.data
         .map { p -> p[SOURCES].orEmpty().map(Uri::parse).toSet() }
@@ -118,6 +120,13 @@ class FolderStore(private val context: Context) {
             name = p[CAM_OVERLAY_NAME].orEmpty(),
             position = CameraOverlayPosition.fromKey(p[CAM_OVERLAY_POSITION]),
             fontSizeSp = (p[CAM_OVERLAY_FONT_SIZE] ?: 18).coerceIn(12, 36),
+        )
+    }
+
+    val documentCapture: Flow<DocumentCaptureSettings> = context.dataStore.data.map { p ->
+        DocumentCaptureSettings(
+            enabled = p[CAMERA_DOCUMENT_SCAN] ?: true,
+            profile = DocumentCaptureProfile.fromKey(p[CAMERA_DOCUMENT_PROFILE]),
         )
     }
 
@@ -173,6 +182,9 @@ class FolderStore(private val context: Context) {
         context.dataStore.edit { it[CAM_OVERLAY_POSITION] = v.key }
     suspend fun setCameraOverlayFontSize(v: Int) =
         context.dataStore.edit { it[CAM_OVERLAY_FONT_SIZE] = v.coerceIn(12, 36) }
+    suspend fun setDocumentScanEnabled(v: Boolean) = context.dataStore.edit { it[CAMERA_DOCUMENT_SCAN] = v }
+    suspend fun setDocumentCaptureProfile(v: DocumentCaptureProfile) =
+        context.dataStore.edit { it[CAMERA_DOCUMENT_PROFILE] = v.key }
 
     // --- Статистика ---
     suspend fun addHistory(entry: HistoryEntry) = context.dataStore.edit { prefs ->
